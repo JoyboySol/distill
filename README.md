@@ -2,24 +2,27 @@
 
 这个目录是一个异步蒸馏流水线，用来把原始样本逐条喂给模型，拿到回答后整理成统一的 SFT 训练格式，并在写盘时附带基础判题结果。
 
-它现在已经从单文件脚本拆成了几个模块，便于单独维护：
+它现在按职责分层了，只保留新路径：
 
-- `distill/distill.py`
-  CLI 入口，只负责解析参数和启动流水线。
-- `distill/config.py`
-  配置定义和日志初始化。
-- `distill/llm.py`
-  异步 OpenAI 兼容客户端，请求重试和多后端负载分配。
-- `distill/failure.py`
-  失败记录、失败样本跳过。
-- `distill/judge.py`
-  `math` / `code` 判题逻辑。
-- `distill/pipeline.py`
-  `producer -> generation -> judge -> writer` 主流水线。
-- `distill/stats.py`
-  输出结果统计脚本。
-- `distill/utils.py`
-  通用序列化和消息规范化工具。
+- `distill/cli.py`
+  主 CLI 入口，负责解析命令行和 YAML task config。
+- `distill/__main__.py`
+  支持直接运行 `python -m distill`。
+- `distill/runtime/`
+  运行配置、manifest 发现、日志初始化。
+- `distill/core/`
+  `producer -> generation -> judge -> writer` 主逻辑和相关组件。
+- `distill/common/`
+  通用工具函数。
+- `distill/tools/`
+  辅助脚本，例如统计。
+旧的顶层兼容文件已经移除，请统一使用新路径：
+
+- `distill.cli`
+- `distill.runtime.*`
+- `distill.core.*`
+- `distill.common.*`
+- `distill.tools.*`
 
 ## 1. 项目目标
 
@@ -290,13 +293,135 @@ writer 在主流程收尾时，会把未 merge 的 segment 按目标大小合并
 - `correct/shards`
   做高质量子集训练或单独抽样
 
+为了支持更轻量的断点续跑，输出目录下还会维护：
+
+- `.resume/completed_index.jsonl`
+  增量完成索引，用来跳过已经写入 `all` 流的样本
+- `.resume/resume_state.json`
+  轻量运行状态，记录 `written` / `correct` / `overlong` 和下一个 segment/shard 编号
+
+正常情况下，后续 resume 会直接读取这两个文件，不需要再全量扫描历史 segment/shard 内容。只有 `.resume` 缺失或损坏时，才会做一次回退扫描来重建状态。
+
 ## 8. 运行方式
+
+### 8.1 Manifest / YAML task
+
+现在支持用 YAML 保存单个任务配置，默认 manifest 根目录是：
+现在也支持“单文件多 task + 顶层公共配置”。
+
+- `manifest/`
+
+示例任务放在：
+
+- `manifest/rule_examples/`
+
+你可以先列出当前可用 YAML：
+
+```bash
+./.venv/bin/python -m distill --list-configs
+```
+
+按名称直接运行某个任务：
+
+```bash
+./.venv/bin/python -m distill --config-name local_parquet_task
+```
+
+或者显式给路径：
+
+```bash
+./.venv/bin/python -m distill \
+  --config manifest/rule_examples/local_parquet_task.yaml
+```
+
+CLI 参数会覆盖 YAML 里的同名字段，所以你可以这样临时改：
+
+```bash
+./.venv/bin/python -m distill \
+  --config-name local_parquet_task \
+  --range-start 100 \
+  --range-end 200
+```
+
+支持写进 YAML 的常用字段包括：
+
+- `task_name`
+- `input_dir`
+- `output_dir`
+- `failure_log`
+- `file_pattern`
+- `input_field`
+- `label_field`
+- `model`
+- `api_key`
+- `base_urls`
+- `ports`
+- `concurrency`
+- `judge_concurrency`
+- `active_files`
+- `rollout_count`
+- `max_tokens`
+- `batch_size`
+- `segment_size_mb`
+- `segment_flush_interval_sec`
+- `shard_size_mb`
+- `write_retries`
+- `range_start`
+- `range_end`
+
+`base_urls` 和 `ports` 都支持列表写法，比较适合 YAML。
+
+### 8.2 单文件多 task
+
+如果你有批量跑的需求，现在更推荐把多个 task 放进同一个 manifest YAML：
+
+```yaml
+model: Nanbeige4.1-3B
+ports:
+  - 6758-6765
+concurrency: 1024
+judge_concurrency: 32
+max_tokens: 12000
+
+tasks:
+  - task_name: task_a
+    input_dir: /data/a
+    output_dir: /out/a
+    file_pattern: a.parquet
+
+  - task_name: task_b
+    input_dir: /data/b
+    output_dir: /out/b
+    file_pattern: b.parquet
+    max_tokens: 16000
+```
+
+规则是：
+
+- 顶层字段会作为公共配置应用到所有 task
+- 也可以显式写到 `defaults:` 里，效果一样
+- 每个 task 里同名字段会覆盖顶层公共配置
+- 如果 manifest 里有多个 task，`python -m distill --config xxx.yaml` 会按顺序依次跑完
+- 如果只想跑其中一个，用 `--task <task_name>`
+
+示例：
+
+```bash
+./.venv/bin/python -m distill \
+  --config manifest/rule_examples/batch_tasks.yaml
+```
+
+```bash
+./.venv/bin/python -m distill \
+  --config manifest/rule_examples/batch_tasks.yaml \
+  --task openthoughts3_math_part2
+```
 
 推荐直接使用当前目录提供的虚拟环境：
 
 ```bash
 /mnt/ssd/lvzhihao/PostTrain/distill/.venv/bin/python \
-  /mnt/ssd/lvzhihao/PostTrain/distill/distill/distill.py \
+  -m distill \
   --input-dir /path/to/input \
   --output-dir /path/to/output \
   --file-pattern "*.parquet" \
@@ -305,6 +430,16 @@ writer 在主流程收尾时，会把未 merge 的 segment 按目标大小合并
 
 ### 常用参数
 
+- `--config`
+  直接加载某个 YAML task 文件。
+- `--config-name`
+  从 `manifest/` 里按名字找任务配置。
+- `--task`
+  当 YAML 里包含多个 task 时，只运行指定 `task_name`。
+- `--manifest-dir`
+  指定 manifest 根目录，默认是仓库下的 `manifest/`。
+- `--list-configs`
+  列出 manifest 下可用的 YAML 文件。
 - `--input-dir`
   输入目录。
 - `--output-dir`
@@ -321,18 +456,28 @@ writer 在主流程收尾时，会把未 merge 的 segment 按目标大小合并
   文件列表结束位置。
 - `--model`
   请求使用的模型名。
+- `--api-key`
+  OpenAI 兼容后端使用的 API key，默认读取 `OPENAI_API_KEY`，否则退回 `EMPTY`。
+- `--base-url` / `--base-urls`
+  显式指定一个或多个完整后端地址，适合非本地或非连续端口场景。
 - `--ports`
-  直接给本地端口列表，例如 `6758,6759,6761-6765`。
+  向后兼容的本地端口快捷写法，例如 `6758,6759,6761-6765`。
 - `--concurrency`
   生成并发。
 - `--judge-concurrency`
   判题并发。
 - `--active-files`
   同时活跃读取的文件数。
+- `--rollout-count`
+  每条输入样本独立生成多少次 rollout，默认 `1`。
+- `--max-tokens`
+  单条 assistant 回复最多生成多少 token，默认 `7000`。
 - `--batch-size`
   每次读取批大小。
 - `--segment-size-mb`
   中间 `jsonl segment` 的目标大小。
+- `--segment-flush-interval-sec`
+  即使没达到大小阈值，也每隔多少秒强制 flush 一次 segment buffer。`0` 表示关闭。
 - `--shard-size-mb`
   目标 shard 大小。
 - `--write-retries`
@@ -344,7 +489,17 @@ writer 在主流程收尾时，会把未 merge 的 segment 按目标大小合并
 
 ```bash
 /mnt/ssd/lvzhihao/PostTrain/distill/.venv/bin/python \
-  /mnt/ssd/lvzhihao/PostTrain/distill/distill/distill.py \
+  -m distill \
+  --config-name local_parquet_task \
+  --range-start 0 \
+  --range-end 100
+```
+
+如果你不想用 YAML，也可以继续直接在命令行里全部写出来：
+
+```bash
+/mnt/ssd/lvzhihao/PostTrain/distill/.venv/bin/python \
+  -m distill \
   --input-dir /mnt/hdd/lvzhihao/data/KodCode-V1-SFT-4o/data \
   --output-dir /mnt/hdd/lvzhihao/output/KodCode-V1-SFT-4o \
   --file-pattern "*.parquet" \
@@ -370,9 +525,34 @@ writer 在主流程收尾时，会把未 merge 的 segment 按目标大小合并
 
 ### 端口配置
 
-现在主推荐用 `--ports`，不用再手写 URL：
+现在支持两套后端地址接口：
 
-#### 方式 1：连续端口范围
+- 推荐优先用 `--base-url` / `--base-urls`
+  适合远端服务、混合域名、非连续端口。
+- 本地多实例时继续可以用 `--ports`
+  它只是生成 `http://localhost:{port}/v1` 的快捷方式。
+
+解析优先级如下：
+
+1. `--base-url` / `--base-urls`
+2. 环境变量 `DISTILL_BASE_URLS`
+3. `--ports`
+4. 环境变量 `DISTILL_PORTS`
+5. 默认 `6758-6765`
+
+#### 方式 1：直接给完整 URL
+
+```bash
+--base-url "http://host-a:8000/v1,http://host-b:8000/v1"
+```
+
+也支持环境变量：
+
+```bash
+export DISTILL_BASE_URLS="http://host-a:8000/v1,http://host-b:8000/v1"
+```
+
+#### 方式 2：本地端口快捷写法
 
 适合一组本地 vLLM / OpenAI 兼容服务连续起在多个端口上：
 
@@ -388,13 +568,13 @@ http://localhost:6758/v1
 http://localhost:6765/v1
 ```
 
-#### 方式 2：离散端口 + 范围混写
+#### 方式 3：离散端口 + 范围混写
 
 ```bash
 --ports 6758,6759,6761-6765
 ```
 
-如果命令里不传 `--ports`，程序会优先读取环境变量：
+如果命令里不传 `--ports`，程序还会读取环境变量：
 
 - `DISTILL_PORTS`
 
@@ -416,7 +596,7 @@ http://localhost:6765/v1
 
 ```bash
 /mnt/ssd/lvzhihao/PostTrain/distill/.venv/bin/python \
-  /mnt/ssd/lvzhihao/PostTrain/distill/distill/distill.py \
+  -m distill \
   --input-dir /data/my_jsonl \
   --output-dir /data/my_output \
   --file-pattern "*.jsonl" \
@@ -429,7 +609,7 @@ http://localhost:6765/v1
 
 ```bash
 /mnt/ssd/lvzhihao/PostTrain/distill/.venv/bin/python \
-  /mnt/ssd/lvzhihao/PostTrain/distill/distill/distill.py \
+  -m distill \
   --input-dir /data/my_input \
   --output-dir /data/my_output \
   --range-start 100 \
@@ -443,7 +623,7 @@ http://localhost:6765/v1
 
 ```bash
 /mnt/ssd/lvzhihao/PostTrain/distill/.venv/bin/python \
-  /mnt/ssd/lvzhihao/PostTrain/distill/distill/stats.py \
+  -m distill.tools.stats \
   --output-dir /path/to/output \
   --stream all
 ```
@@ -452,7 +632,7 @@ http://localhost:6765/v1
 
 ```bash
 /mnt/ssd/lvzhihao/PostTrain/distill/.venv/bin/python \
-  /mnt/ssd/lvzhihao/PostTrain/distill/distill/stats.py \
+  -m distill.tools.stats \
   --output-dir /path/to/output \
   --stream all \
   --save-json /path/to/output/judge_stats.json
@@ -462,7 +642,7 @@ http://localhost:6765/v1
 
 ```bash
 /mnt/ssd/lvzhihao/PostTrain/distill/.venv/bin/python \
-  /mnt/ssd/lvzhihao/PostTrain/distill/distill/stats.py \
+  -m distill.tools.stats \
   --output-dir /path/to/output \
   --stream correct
 ```
@@ -539,7 +719,7 @@ http://localhost:6765/v1
 
 ```bash
 /mnt/ssd/lvzhihao/PostTrain/distill/.venv/bin/python \
-  /mnt/ssd/lvzhihao/PostTrain/distill/distill/distill.py \
+  -m distill \
   --input-dir /mnt/hdd/huanglisheng/train_data/G-OPD-Training-Data/DeepMath-103K \
   --output-dir /mnt/hdd/lvzhihao/output/DeepMath-103K-distill \
   --file-pattern "slime_style_train_data.jsonl" \

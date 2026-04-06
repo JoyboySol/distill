@@ -4,8 +4,12 @@ import os
 import time
 from typing import Set
 
-from config import logger
-from utils import safe_json_dumps
+try:
+    from ..runtime.settings import logger
+    from ..common.utils import safe_json_dumps
+except ImportError:
+    from runtime.settings import logger
+    from common.utils import safe_json_dumps
 
 
 class FailureRecorder:
@@ -19,8 +23,10 @@ class FailureRecorder:
         self._load()
 
     @staticmethod
-    def _build_key(source_file: str, source_row: int) -> str:
-        return f"{source_file}::{source_row}"
+    def _build_key(source_file: str,
+                   source_row: int,
+                   rollout_index: int = 0) -> str:
+        return f"{source_file}::{source_row}::{rollout_index}"
 
     def _load(self):
         if not os.path.exists(self.log_path):
@@ -34,8 +40,10 @@ class FailureRecorder:
                         data = json.loads(line)
                         source_file = data["source_file"]
                         source_row = int(data["source_row"])
+                        rollout_index = int(data.get("rollout_index", 0) or 0)
                         self.failed_set.add(
-                            self._build_key(source_file, source_row))
+                            self._build_key(source_file, source_row,
+                                            rollout_index))
                     except Exception:
                         pass
             logger.info(
@@ -46,12 +54,17 @@ class FailureRecorder:
         except Exception as e:
             logger.error("Failed to load failure log: %s", e)
 
-    async def record_failure(self, source_file: str, source_row: int,
-                             reason: str):
-        self.failed_set.add(self._build_key(source_file, source_row))
+    async def record_failure(self,
+                             source_file: str,
+                             source_row: int,
+                             reason: str,
+                             rollout_index: int = 0):
+        self.failed_set.add(
+            self._build_key(source_file, source_row, rollout_index))
         entry = safe_json_dumps({
             "source_file": source_file,
             "source_row": source_row,
+            "rollout_index": rollout_index,
             "reason": str(reason),
             "time": time.time(),
         })
@@ -62,5 +75,9 @@ class FailureRecorder:
             with open(self.log_path, "a", encoding="utf-8") as f:
                 f.write(entry + "\n")
 
-    def should_skip(self, source_file: str, source_row: int) -> bool:
-        return self._build_key(source_file, source_row) in self.failed_set
+    def should_skip(self,
+                    source_file: str,
+                    source_row: int,
+                    rollout_index: int = 0) -> bool:
+        return self._build_key(source_file, source_row,
+                               rollout_index) in self.failed_set

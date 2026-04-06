@@ -1,0 +1,30 @@
+task_name: remote_jsonl_task
+
+input_dir: /data/my_jsonl
+output_dir: /data/my_output
+failure_log: remote_failed_tasks.jsonl
+
+file_pattern: "*.jsonl"
+input_field: prompt
+label_field: label
+
+model: Qwen3-30B-A3B-Thinking-2507
+api_key: EMPTY
+base_urls:
+  - http://host-a:8000/v1
+  - http://host-b:8000/v1
+
+concurrency: 512
+judge_concurrency: 16
+active_files: 4
+rollout_count: 1
+max_tokens: 7000
+batch_size: 500
+
+segment_size_mb: 4
+segment_flush_interval_sec: 10
+shard_size_mb: 128
+write_retries: 3
+
+range_start: 0
+range_end: 100

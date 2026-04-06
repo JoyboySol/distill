@@ -1,0 +1,28 @@
+task_name: openthoughts3_math_nanbeige4_1_3b
+
+input_dir: /mnt/hdd/lvzhihao/data/OpenThoughts3-1.2M/data
+output_dir: /mnt/hdd/lvzhihao/output/OpenThoughts3-1.2M-math-distill-nanbeige4_1_3b
+failure_log: openthoughts3_math_nanbeige4_1_3b_failed.jsonl
+
+file_pattern: all_data_with_questions_math_unique_queries_high_confidence.parquet
+input_field: question
+label_field: label
+
+model: Nanbeige4.1-3B
+ports:
+  - 6758-6765
+
+concurrency: 256
+judge_concurrency: 16
+active_files: 1
+rollout_count: 4
+max_tokens: 62000
+batch_size: 1000
+
+segment_size_mb: 1
+segment_flush_interval_sec: 10
+shard_size_mb: 200
+write_retries: 3
+
+range_start: 0
+range_end: 1

@@ -1,0 +1,28 @@
+task_name: local_parquet_task
+
+input_dir: /mnt/hdd/lvzhihao/data/KodCode-V1-SFT-4o/data
+output_dir: /mnt/hdd/lvzhihao/output/KodCode-V1-SFT-4o
+failure_log: failed_tasks.jsonl
+
+file_pattern: "*.parquet"
+input_field: question
+label_field: answer
+
+model: Qwen3-30B-A3B-Thinking-2507
+ports:
+  - 6758-6765
+
+concurrency: 2048
+judge_concurrency: 32
+active_files: 6
+rollout_count: 1
+max_tokens: 7000
+batch_size: 1000
+
+segment_size_mb: 4
+segment_flush_interval_sec: 10
+shard_size_mb: 200
+write_retries: 3
+
+range_start: 0
+range_end:

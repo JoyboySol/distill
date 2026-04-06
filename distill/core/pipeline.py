@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import signal
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Set
@@ -13,17 +14,25 @@ import pyarrow.parquet as pq
 from openai import APITimeoutError, BadRequestError
 from tqdm.asyncio import tqdm
 
-from config import PipelineConfig, logger
-from failure import FailureRecorder
-from judge import judge_output
-from llm import AsyncLLMManager
-from utils import ensure_message_shape, safe_json_dumps
+try:
+    from ..runtime.settings import PipelineConfig, logger
+    from ..common.utils import ensure_message_shape, safe_json_dumps
+    from .failure import FailureRecorder
+    from .judge import judge_output
+    from .llm import AsyncLLMManager, GenerationResponse
+except ImportError:
+    from runtime.settings import PipelineConfig, logger
+    from common.utils import ensure_message_shape, safe_json_dumps
+    from core.failure import FailureRecorder
+    from core.judge import judge_output
+    from core.llm import AsyncLLMManager, GenerationResponse
 
 
 @dataclass
 class TaskItem:
     source_file: str
     source_row: int
+    rollout_index: int
     prompt: str
     row_data: Dict[str, Any]
 
@@ -40,9 +49,11 @@ class ResultItem:
 class GenerationResultItem:
     task: TaskItem
     messages: List[Dict[str, Any]]
+    finish_reason: Optional[str]
+    usage: Dict[str, Any]
 
 
-class RoundRobinPipeline:
+class DistillPipeline:
     STREAM_ALL = "all"
     STREAM_CORRECT = "correct"
 
@@ -54,9 +65,15 @@ class RoundRobinPipeline:
             maxsize=config.queue_max_size)
         self.judge_queue: asyncio.Queue = asyncio.Queue()
         self.result_queue: asyncio.Queue = asyncio.Queue()
+        self.stop_requested = False
 
         self.completed_records_loaded = False
         self.completed_records: Set[str] = set()
+        self.resume_progress = {
+            "written": 0,
+            "correct": 0,
+            "overlong": 0,
+        }
 
         self.segment_counters = {
             self.STREAM_ALL: 0,
@@ -72,8 +89,20 @@ class RoundRobinPipeline:
         }
 
     @staticmethod
-    def _completed_key(source_file: str, source_row: int) -> str:
-        return f"{source_file}::{source_row}"
+    def _refresh_progress_postfix(pbar: tqdm):
+        discovered = int(getattr(pbar, "_discovered_tasks", 0))
+        written = int(getattr(pbar, "_written_tasks", 0))
+        correct = int(getattr(pbar, "_correct_tasks", 0))
+        overlong = int(getattr(pbar, "_overlong_tasks", 0))
+        pbar.set_postfix_str(
+            f"discovered={discovered} written={written} correct={correct} overlong={overlong}"
+        )
+
+    @staticmethod
+    def _completed_key(source_file: str,
+                       source_row: int,
+                       rollout_index: int = 0) -> str:
+        return f"{source_file}::{source_row}::{rollout_index}"
 
     def _stream_root(self, stream_name: str) -> str:
         path = os.path.join(self.config.output_dir, stream_name)
@@ -85,8 +114,157 @@ class RoundRobinPipeline:
         os.makedirs(path, exist_ok=True)
         return path
 
+    @staticmethod
+    def _count_jsonl_rows(file_path: str) -> int:
+        count = 0
+        with open(file_path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                count += chunk.count(b"\n")
+        return count
+
+    def _estimate_input_rows(self, input_files: List[str]) -> Optional[int]:
+        total_rows = 0
+        try:
+            for file_path in input_files:
+                ext = os.path.splitext(file_path)[1].lower()
+                if ext == ".parquet":
+                    total_rows += pq.ParquetFile(file_path).metadata.num_rows
+                    continue
+                if ext == ".jsonl":
+                    total_rows += self._count_jsonl_rows(file_path)
+                    continue
+                logger.warning("Skipping row estimate for unsupported file: %s",
+                               file_path)
+            return total_rows
+        except Exception as e:
+            logger.warning("Failed to estimate input row count: %s", e)
+            return None
+
+    def _request_stop(self, signame: str):
+        if self.stop_requested:
+            return
+        self.stop_requested = True
+        logger.warning(
+            "Received %s, stopping producer and draining queued work before exit...",
+            signame,
+        )
+
     def _merge_state_path(self, stream_name: str) -> str:
         return os.path.join(self._stream_root(stream_name), "merge_state.json")
+
+    def _resume_dir(self) -> str:
+        path = os.path.join(self.config.output_dir, ".resume")
+        os.makedirs(path, exist_ok=True)
+        return path
+
+    def _completed_index_path(self) -> str:
+        return os.path.join(self._resume_dir(), "completed_index.jsonl")
+
+    def _resume_state_path(self) -> str:
+        return os.path.join(self._resume_dir(), "resume_state.json")
+
+    @staticmethod
+    def _max_index_from_names(names: List[str], pattern: str) -> int:
+        max_idx = -1
+        compiled = re.compile(pattern)
+        for name in names:
+            match = compiled.search(name)
+            if not match:
+                continue
+            max_idx = max(max_idx, int(match.group(1)))
+        return max_idx
+
+    def _default_resume_state(self) -> Dict[str, Any]:
+        return {
+            "version": 2,
+            "progress": {
+                "written": 0,
+                "correct": 0,
+                "overlong": 0,
+            },
+            "streams": {
+                self.STREAM_ALL: {
+                    "next_segment_idx": 0,
+                    "next_shard_idx": 0,
+                },
+                self.STREAM_CORRECT: {
+                    "next_segment_idx": 0,
+                    "next_shard_idx": 0,
+                },
+            },
+        }
+
+    def _load_resume_state(self) -> Optional[Dict[str, Any]]:
+        path = self._resume_state_path()
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            if not isinstance(state, dict):
+                return None
+            return state
+        except Exception as e:
+            logger.warning("Failed to load resume state: %s", e)
+            return None
+
+    def _save_resume_state(self):
+        state = self._default_resume_state()
+        state["progress"] = {
+            "written": int(self.resume_progress["written"]),
+            "correct": int(self.resume_progress["correct"]),
+            "overlong": int(self.resume_progress["overlong"]),
+        }
+        state["streams"][self.STREAM_ALL] = {
+            "next_segment_idx": int(self.segment_counters[self.STREAM_ALL]),
+            "next_shard_idx": int(self.shard_counters[self.STREAM_ALL]),
+        }
+        state["streams"][self.STREAM_CORRECT] = {
+            "next_segment_idx": int(self.segment_counters[self.STREAM_CORRECT]),
+            "next_shard_idx": int(self.shard_counters[self.STREAM_CORRECT]),
+        }
+
+        target = self._resume_state_path()
+        temp = target + ".tmp"
+        with open(temp, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2, sort_keys=True)
+        os.replace(temp, target)
+
+    def _append_completed_index(self, records: List[Dict[str, Any]]):
+        if not records:
+            return
+        path = self._completed_index_path()
+        with open(path, "a", encoding="utf-8") as f:
+            for record in records:
+                f.write(
+                    safe_json_dumps({
+                        "source_file": record["source_file"],
+                        "source_row": int(record["source_row"]),
+                        "rollout_index": int(record.get("rollout_index", 0)
+                                             or 0),
+                    }) + "\n")
+
+    def _load_completed_index(self) -> Optional[Set[str]]:
+        path = self._completed_index_path()
+        if not os.path.exists(path):
+            return None
+        completed_sources: Set[str] = set()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    completed_sources.add(
+                        self._completed_key(
+                            str(row["source_file"]),
+                            int(row["source_row"]),
+                            int(row.get("rollout_index", 0) or 0),
+                        ))
+            return completed_sources
+        except Exception as e:
+            logger.warning("Failed to load completed index: %s", e)
+            return None
 
     def _load_merge_state(self, stream_name: str) -> Dict[str, Any]:
         path = self._merge_state_path(stream_name)
@@ -104,6 +282,56 @@ class RoundRobinPipeline:
                            e)
             return {"merged_segments": []}
 
+    def _discover_next_stream_index(self, stream_name: str, kind: str) -> int:
+        if kind == "segment":
+            dir_path = self._stream_dir(stream_name, "segments")
+            names = os.listdir(dir_path) if os.path.isdir(dir_path) else []
+            return self._max_index_from_names(names, r"segment_(\d+)\.jsonl$") + 1
+
+        dir_path = self._stream_dir(stream_name, "shards")
+        names = os.listdir(dir_path) if os.path.isdir(dir_path) else []
+        return self._max_index_from_names(names, r"shard_(\d+)\.parquet$") + 1
+
+    def _load_progress_from_resume_state(self,
+                                         resume_state: Optional[Dict[str, Any]]):
+        progress = (resume_state or {}).get("progress") or {}
+        self.resume_progress = {
+            "written": int(progress.get("written", 0) or 0),
+            "correct": int(progress.get("correct", 0) or 0),
+            "overlong": int(progress.get("overlong", 0) or 0),
+        }
+
+    def _load_stream_counters_from_resume_state(
+            self, resume_state: Optional[Dict[str, Any]]) -> bool:
+        streams = (resume_state or {}).get("streams") or {}
+        all_stream = streams.get(self.STREAM_ALL) or {}
+        correct_stream = streams.get(self.STREAM_CORRECT) or {}
+        has_any = bool(all_stream or correct_stream)
+        if not has_any:
+            return False
+
+        self.segment_counters[self.STREAM_ALL] = int(
+            all_stream.get("next_segment_idx", 0) or 0)
+        self.segment_counters[self.STREAM_CORRECT] = int(
+            correct_stream.get("next_segment_idx", 0) or 0)
+        self.shard_counters[self.STREAM_ALL] = int(
+            all_stream.get("next_shard_idx", 0) or 0)
+        self.shard_counters[self.STREAM_CORRECT] = int(
+            correct_stream.get("next_shard_idx", 0) or 0)
+        return True
+
+    def _load_stream_counters_lightweight(self):
+        self.segment_counters[self.STREAM_ALL] = self._discover_next_stream_index(
+            self.STREAM_ALL, "segment")
+        self.segment_counters[
+            self.STREAM_CORRECT] = self._discover_next_stream_index(
+                self.STREAM_CORRECT, "segment")
+        self.shard_counters[self.STREAM_ALL] = self._discover_next_stream_index(
+            self.STREAM_ALL, "shard")
+        self.shard_counters[
+            self.STREAM_CORRECT] = self._discover_next_stream_index(
+                self.STREAM_CORRECT, "shard")
+
     def _save_merge_state(self, stream_name: str, state: Dict[str, Any]):
         target = self._merge_state_path(stream_name)
         temp = target + ".tmp"
@@ -113,11 +341,15 @@ class RoundRobinPipeline:
 
     def _iter_completed_keys_from_file(self, file_path: str) -> Iterator[str]:
         if file_path.endswith(".parquet"):
-            table = pq.read_table(file_path, columns=["source_file", "source_row"])
+            table = pq.read_table(
+                file_path,
+                columns=["source_file", "source_row", "rollout_index"],
+            )
             for row in table.to_pylist():
                 yield self._completed_key(
                     str(row["source_file"]),
                     int(row["source_row"]),
+                    int(row.get("rollout_index", 0) or 0),
                 )
             return
 
@@ -129,7 +361,82 @@ class RoundRobinPipeline:
                 yield self._completed_key(
                     str(row["source_file"]),
                     int(row["source_row"]),
+                    int(row.get("rollout_index", 0) or 0),
                 )
+
+    def _iter_records_from_file(self, file_path: str) -> Iterator[Dict[str, Any]]:
+        if file_path.endswith(".parquet"):
+            table = pq.read_table(
+                file_path,
+                columns=[
+                    "source_file",
+                    "source_row",
+                    "rollout_index",
+                    "generation_finish_reason",
+                    "is_correct",
+                ],
+            )
+            for row in table.to_pylist():
+                yield row
+            return
+
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                yield json.loads(line)
+
+    def _rebuild_overlong_progress(self) -> int:
+        overlong_completed_keys: Set[str] = set()
+        shard_dir = self._stream_dir(self.STREAM_ALL, "shards")
+        shard_files = sorted(glob.glob(os.path.join(shard_dir, "shard_*.parquet")))
+        segment_dir = self._stream_dir(self.STREAM_ALL, "segments")
+        segment_files = sorted(
+            glob.glob(os.path.join(segment_dir, "segment_*.jsonl")))
+        existing_files = [("shard", file_path) for file_path in shard_files]
+        existing_files.extend(("segment", file_path) for file_path in segment_files)
+
+        progress = tqdm(
+            total=len(existing_files),
+            desc="Resume repair [overlong]",
+            unit="file",
+            leave=False,
+            dynamic_ncols=True,
+        )
+
+        for _, file_path in existing_files:
+            try:
+                for row in self._iter_records_from_file(file_path):
+                    if row.get("generation_finish_reason") != "length":
+                        continue
+                    overlong_completed_keys.add(
+                        self._completed_key(
+                            str(row["source_file"]),
+                            int(row["source_row"]),
+                            int(row.get("rollout_index", 0) or 0),
+                        ))
+                progress.set_postfix_str(
+                    f"overlong={len(overlong_completed_keys)}")
+            except Exception as e:
+                logger.warning("Failed to rebuild overlong from %s: %s",
+                               file_path, e)
+            finally:
+                progress.update(1)
+
+        progress.close()
+        return len(overlong_completed_keys)
+
+    def _resume_state_needs_progress_repair(
+            self,
+            resume_state: Optional[Dict[str, Any]],
+            completed_index: Optional[Set[str]],
+    ) -> bool:
+        if resume_state is None or completed_index is None:
+            return False
+        version = int(resume_state.get("version", 0) or 0)
+        if version >= 2:
+            return False
+        return len(completed_index) > 0
 
     def _scan_stream_state(self, stream_name: str) -> Dict[str, Any]:
         completed_sources: Set[str] = set()
@@ -195,6 +502,54 @@ class RoundRobinPipeline:
         os.makedirs(self.config.output_dir, exist_ok=True)
 
         logger.info("Loading completed-record index for resume support...")
+        resume_state = self._load_resume_state()
+        completed_index = self._load_completed_index()
+        if resume_state is not None and completed_index is not None:
+            self.completed_records = completed_index
+            self._load_progress_from_resume_state(resume_state)
+            self._load_stream_counters_from_resume_state(resume_state)
+            if self._resume_state_needs_progress_repair(resume_state,
+                                                       completed_index):
+                logger.info(
+                    "Repairing legacy resume progress counters from persisted outputs..."
+                )
+                self.resume_progress["written"] = len(self.completed_records)
+                self.resume_progress["overlong"] = self._rebuild_overlong_progress(
+                )
+                self._save_resume_state()
+            logger.info(
+                "Loaded resume state without full scan: completed=%s written=%s correct=%s overlong=%s",
+                len(self.completed_records),
+                self.resume_progress["written"],
+                self.resume_progress["correct"],
+                self.resume_progress["overlong"],
+            )
+            return
+
+        if completed_index is not None:
+            self.completed_records = completed_index
+            self._load_progress_from_resume_state(resume_state)
+            if self.resume_progress["written"] <= 0:
+                self.resume_progress["written"] = len(self.completed_records)
+            if not self._load_stream_counters_from_resume_state(resume_state):
+                self._load_stream_counters_lightweight()
+            self._save_resume_state()
+            logger.info(
+                "Recovered from completed index without full content scan: completed=%s written=%s correct=%s overlong=%s",
+                len(self.completed_records),
+                self.resume_progress["written"],
+                self.resume_progress["correct"],
+                self.resume_progress["overlong"],
+            )
+            return
+
+        if resume_state is not None:
+            self._load_progress_from_resume_state(resume_state)
+            self._load_stream_counters_from_resume_state(resume_state)
+            logger.warning(
+                "Resume state exists but completed index is missing; falling back to one-time stream scan to rebuild skip index."
+            )
+
         all_state = self._scan_stream_state(self.STREAM_ALL)
         correct_state = self._scan_stream_state(self.STREAM_CORRECT)
 
@@ -205,15 +560,32 @@ class RoundRobinPipeline:
         self.shard_counters[self.STREAM_ALL] = all_state["next_shard_idx"]
         self.shard_counters[self.STREAM_CORRECT] = correct_state[
             "next_shard_idx"]
+        self.resume_progress = {
+            "written": len(all_state["completed_sources"]),
+            "correct": len(correct_state["completed_sources"]),
+            "overlong": 0,
+        }
+        self._append_completed_index([
+            {
+                "source_file": source_file,
+                "source_row": source_row,
+                "rollout_index": rollout_index,
+            } for source_file, source_row, rollout_index in (
+                key.rsplit("::", 2) for key in self.completed_records)
+        ])
+        self._save_resume_state()
 
         logger.info(
-            "Loaded %s completed rows from all-stream persisted outputs",
+            "Loaded %s completed rows from persisted outputs and bootstrapped lightweight resume state",
             len(self.completed_records),
         )
 
-    def _is_completed(self, source_file: str, source_row: int) -> bool:
-        return self._completed_key(source_file,
-                                   source_row) in self.completed_records
+    def _is_completed(self,
+                      source_file: str,
+                      source_row: int,
+                      rollout_index: int = 0) -> bool:
+        return self._completed_key(source_file, source_row,
+                                   rollout_index) in self.completed_records
 
     def _normalize_prompt(self, raw_prompt) -> Optional[str]:
         if raw_prompt is None:
@@ -311,7 +683,7 @@ class RoundRobinPipeline:
             if batch_data:
                 yield pa.Table.from_pylist(batch_data)
 
-    async def producer(self, input_files: List[str]):
+    async def producer(self, input_files: List[str], pbar: tqdm):
         self._load_completed_records()
         logger.info("Producer started. Total files to process in this node: %s",
                     len(input_files))
@@ -354,35 +726,48 @@ class RoundRobinPipeline:
         }
 
         while active_iterators:
+            if self.stop_requested:
+                logger.info("Producer stop requested. No more new rows will be queued.")
+                break
             for file_path, iterator in list(active_iterators):
+                if self.stop_requested:
+                    break
                 try:
                     batch = next(iterator)
                     rows = [self._extract_row_dict(row) for row in batch.to_pylist()]
                     current_idx = global_indices_tracker.get(file_path, 0)
 
                     for row_data in rows:
+                        if self.stop_requested:
+                            break
                         source_file = os.path.abspath(file_path)
                         source_row = current_idx
-
-                        if self._is_completed(source_file, source_row):
-                            current_idx += 1
-                            continue
-
-                        if self.failure_recorder.should_skip(
-                                source_file, source_row):
-                            current_idx += 1
-                            continue
 
                         normalized_prompt = self._normalize_prompt(
                             row_data.get(self.config.input_content_field))
                         if normalized_prompt:
-                            await self.task_queue.put(
-                                TaskItem(
-                                    source_file=source_file,
-                                    source_row=source_row,
-                                    prompt=normalized_prompt,
-                                    row_data=row_data,
-                                ))
+                            for rollout_index in range(self.config.rollout_count):
+                                if self._is_completed(source_file, source_row,
+                                                      rollout_index):
+                                    continue
+
+                                if self.failure_recorder.should_skip(
+                                        source_file, source_row,
+                                        rollout_index):
+                                    continue
+
+                                await self.task_queue.put(
+                                    TaskItem(
+                                        source_file=source_file,
+                                        source_row=source_row,
+                                        rollout_index=rollout_index,
+                                        prompt=normalized_prompt,
+                                        row_data=row_data,
+                                    ))
+                                discovered = int(getattr(pbar, "_discovered_tasks",
+                                                         0)) + 1
+                                pbar._discovered_tasks = discovered
+                                self._refresh_progress_postfix(pbar)
                         else:
                             logger.warning(
                                 "Skipping %s row %s: unsupported or empty input in field '%s'",
@@ -394,6 +779,7 @@ class RoundRobinPipeline:
                                 source_file,
                                 source_row,
                                 f"empty_or_unsupported_input:{self.config.input_content_field}",
+                                rollout_index=0,
                             )
                         current_idx += 1
 
@@ -463,8 +849,13 @@ class RoundRobinPipeline:
                 total += len(safe_json_dumps(message["tool_calls"]))
         return total
 
-    def _build_output_record(self, task: TaskItem,
-                             messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _build_output_record(
+        self,
+        task: TaskItem,
+        messages: List[Dict[str, Any]],
+        finish_reason: Optional[str],
+        usage: Dict[str, Any],
+    ) -> Dict[str, Any]:
         messages = [ensure_message_shape(message) for message in messages]
         dataset_name = self._dataset_name(task.row_data, task.source_file)
         judge_result = judge_output(
@@ -475,7 +866,8 @@ class RoundRobinPipeline:
 
         return {
             "dataset_name": dataset_name,
-            "sample_id": f"{dataset_name}:{task.source_file}:{task.source_row}",
+            "sample_id":
+            f"{dataset_name}:{task.source_file}:{task.source_row}:rollout_{task.rollout_index}",
             "dedup_hash":
             hashlib.sha256(safe_json_dumps(messages).encode("utf-8")).hexdigest(),
             "content_chars": self._message_char_count(messages),
@@ -494,8 +886,14 @@ class RoundRobinPipeline:
             "adapter_error": None,
             "adapter_name": "sharegpt",
             "record_mode": "sft",
+            "generation_finish_reason": finish_reason,
+            "generation_usage": usage or None,
+            "prompt_tokens": usage.get("prompt_tokens"),
+            "completion_tokens": usage.get("completion_tokens"),
+            "total_tokens": usage.get("total_tokens"),
             "source_file": task.source_file,
             "source_row": task.source_row,
+            "rollout_index": task.rollout_index,
             "judge_type": judge_result["judge_type"],
             "judge_backend": judge_result.get("judge_backend"),
             "is_correct": judge_result["is_correct"],
@@ -515,18 +913,31 @@ class RoundRobinPipeline:
                 if not response:
                     raise RuntimeError("empty_response")
                 await self.judge_queue.put(
-                    GenerationResultItem(task=item, messages=response))
+                    GenerationResultItem(
+                        task=item,
+                        messages=response["messages"],
+                        finish_reason=response.get("finish_reason"),
+                        usage=response.get("usage") or {},
+                    ))
 
             except APITimeoutError:
                 logger.warning("TIMEOUT: %s row %s", item.source_file,
                                item.source_row)
                 await self.failure_recorder.record_failure(
-                    item.source_file, item.source_row, "timeout_1h")
+                    item.source_file,
+                    item.source_row,
+                    "timeout_1h",
+                    rollout_index=item.rollout_index,
+                )
             except BadRequestError as e:
                 logger.error("BAD REQUEST: %s row %s - %s", item.source_file,
                              item.source_row, e)
                 await self.failure_recorder.record_failure(
-                    item.source_file, item.source_row, f"bad_request:{e}")
+                    item.source_file,
+                    item.source_row,
+                    f"bad_request:{e}",
+                    rollout_index=item.rollout_index,
+                )
             except Exception as e:
                 logger.error("Worker Error: %s row %s - %s: %s",
                              item.source_file, item.source_row,
@@ -535,6 +946,7 @@ class RoundRobinPipeline:
                     item.source_file,
                     item.source_row,
                     f"worker_error:{type(e).__name__}:{e}",
+                    rollout_index=item.rollout_index,
                 )
             finally:
                 self.task_queue.task_done()
@@ -566,7 +978,12 @@ class RoundRobinPipeline:
                 break
 
             try:
-                record = self._build_output_record(item.task, item.messages)
+                record = self._build_output_record(
+                    item.task,
+                    item.messages,
+                    item.finish_reason,
+                    item.usage,
+                )
                 await self.result_queue.put(
                     ResultItem(
                         source_file=item.task.source_file,
@@ -582,6 +999,7 @@ class RoundRobinPipeline:
                     item.task.source_file,
                     item.task.source_row,
                     f"judge_error:{type(e).__name__}:{e}",
+                    rollout_index=item.task.rollout_index,
                 )
             finally:
                 self.judge_queue.task_done()
@@ -622,7 +1040,18 @@ class RoundRobinPipeline:
                     for record in records:
                         self.completed_records.add(
                             self._completed_key(record["source_file"],
-                                                int(record["source_row"])))
+                                                int(record["source_row"]),
+                                                int(record.get("rollout_index", 0)
+                                                    or 0)))
+                    self._append_completed_index(records)
+                    self.resume_progress["written"] += len(records)
+                    self.resume_progress["correct"] += sum(
+                        1 for record in records
+                        if record.get("is_correct") is True)
+                    self.resume_progress["overlong"] += sum(
+                        1 for record in records
+                        if record.get("generation_finish_reason") == "length")
+                self._save_resume_state()
                 logger.info("Wrote %s segment_%06d.jsonl with %s rows",
                             stream_name, segment_idx, len(records))
                 return
@@ -675,6 +1104,7 @@ class RoundRobinPipeline:
         for attempt in range(1, self.config.write_retries + 1):
             try:
                 self._flush_records(records, stream_name, shard_idx)
+                self._save_resume_state()
                 logger.info("Flushed %s shard_%05d.parquet with %s rows",
                             stream_name, shard_idx, len(records))
                 return
@@ -758,7 +1188,7 @@ class RoundRobinPipeline:
 
         await flush_pending()
 
-    async def writer_daemon(self):
+    async def writer_daemon(self, pbar: tqdm):
         buffers = {
             self.STREAM_ALL: [],
             self.STREAM_CORRECT: [],
@@ -768,9 +1198,22 @@ class RoundRobinPipeline:
             self.STREAM_CORRECT: 0,
         }
         segment_target_bytes = self._segment_target_bytes()
+        flush_interval = max(0.0, self.config.segment_flush_interval_sec)
 
         while True:
-            item = await self.result_queue.get()
+            try:
+                if flush_interval > 0:
+                    item = await asyncio.wait_for(self.result_queue.get(),
+                                                  timeout=flush_interval)
+                else:
+                    item = await self.result_queue.get()
+            except asyncio.TimeoutError:
+                await self._flush_segment_buffer(buffers, buffer_sizes,
+                                                 self.STREAM_ALL)
+                await self._flush_segment_buffer(buffers, buffer_sizes,
+                                                 self.STREAM_CORRECT)
+                continue
+
             if item is None:
                 try:
                     await self._flush_segment_buffer(buffers, buffer_sizes,
@@ -785,12 +1228,19 @@ class RoundRobinPipeline:
 
             buffers[self.STREAM_ALL].append(item.record)
             buffer_sizes[self.STREAM_ALL] += item.estimated_size
+            pbar._written_tasks = int(getattr(pbar, "_written_tasks", 0)) + 1
 
             if item.record.get("is_correct") is True:
                 buffers[self.STREAM_CORRECT].append(item.record)
                 buffer_sizes[self.STREAM_CORRECT] += item.estimated_size
+                pbar._correct_tasks = int(
+                    getattr(pbar, "_correct_tasks", 0)) + 1
+            if item.record.get("generation_finish_reason") == "length":
+                pbar._overlong_tasks = int(
+                    getattr(pbar, "_overlong_tasks", 0)) + 1
 
             try:
+                self._refresh_progress_postfix(pbar)
                 if buffer_sizes[self.STREAM_ALL] >= segment_target_bytes:
                     await self._flush_segment_buffer(buffers, buffer_sizes,
                                                      self.STREAM_ALL)
@@ -818,15 +1268,45 @@ class RoundRobinPipeline:
         print(f"Files ({len(input_files)}):")
         for file_path in input_files:
             print(f"   - {os.path.basename(file_path)}")
+        estimated_rows = self._estimate_input_rows(input_files)
+        if estimated_rows is not None:
+            estimated_tasks = estimated_rows * self.config.rollout_count
+            print(f"Estimated input rows : {estimated_rows}")
+            print(f"Estimated max tasks  : {estimated_tasks}")
         print("=" * 50)
 
         if not input_files:
             logger.error("No files matched the range criteria. Exiting.")
             return
 
-        writer_task = asyncio.create_task(self.writer_daemon())
-        producer_task = asyncio.create_task(self.producer(input_files))
-        pbar = tqdm(desc=f"Processing [{start_idx}:{end_idx}]", unit="row")
+        self._load_completed_records()
+
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, self._request_stop, sig.name)
+            except NotImplementedError:
+                pass
+
+        estimated_rows = self._estimate_input_rows(input_files)
+        estimated_tasks = None
+        if estimated_rows is not None:
+            estimated_tasks = estimated_rows * self.config.rollout_count
+
+        pbar = tqdm(
+            total=estimated_tasks,
+            desc=f"Processing [{start_idx}:{end_idx}]",
+            unit="task",
+            dynamic_ncols=True,
+        )
+        pbar._discovered_tasks = int(self.resume_progress["written"])
+        pbar._written_tasks = int(self.resume_progress["written"])
+        pbar._correct_tasks = int(self.resume_progress["correct"])
+        pbar._overlong_tasks = int(self.resume_progress["overlong"])
+        pbar.n = int(self.resume_progress["written"])
+        self._refresh_progress_postfix(pbar)
+        writer_task = asyncio.create_task(self.writer_daemon(pbar))
+        producer_task = asyncio.create_task(self.producer(input_files, pbar))
         generation_workers = [
             asyncio.create_task(self.worker(i, pbar))
             for i in range(self.config.max_concurrency)
@@ -848,7 +1328,15 @@ class RoundRobinPipeline:
             await self.result_queue.put(None)
             await self._wait_task(writer_task, "writer")
         finally:
+            for sig in (signal.SIGINT, signal.SIGTERM):
+                try:
+                    loop.remove_signal_handler(sig)
+                except NotImplementedError:
+                    pass
             if not pbar.disable:
                 pbar.close()
 
         logger.info("Pipeline Complete.")
+
+
+RoundRobinPipeline = DistillPipeline

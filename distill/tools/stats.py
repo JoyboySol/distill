@@ -28,27 +28,37 @@ def summarize(records: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     judge_type_counter: Counter = Counter()
     judge_backend_counter: Counter = Counter()
     judge_status_counter: Counter = Counter()
+    finish_reason_counter: Counter = Counter()
     correct_counter: Counter = Counter()
     backend_correct_counter: Counter = Counter()
     backend_total_counter: Counter = Counter()
     fallback_reasons: Counter = Counter()
+    overlong_correct = 0
+    overlong_total = 0
 
     for row in records:
         total += 1
         judge_type = row.get("judge_type") or "none"
         judge_backend = row.get("judge_backend") or "none"
         judge_status = row.get("judge_status") or "none"
+        finish_reason = row.get("generation_finish_reason") or "none"
         is_correct = row.get("is_correct")
         judge_detail = row.get("judge_detail") or {}
 
         judge_type_counter[judge_type] += 1
         judge_backend_counter[judge_backend] += 1
         judge_status_counter[judge_status] += 1
+        finish_reason_counter[finish_reason] += 1
         backend_total_counter[judge_backend] += 1
+
+        if finish_reason == "length":
+            overlong_total += 1
 
         if is_correct is True:
             correct_counter["true"] += 1
             backend_correct_counter[judge_backend] += 1
+            if finish_reason == "length":
+                overlong_correct += 1
         elif is_correct is False:
             correct_counter["false"] += 1
         else:
@@ -78,11 +88,21 @@ def summarize(records: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         "judge_type_counts": dict(judge_type_counter),
         "judge_backend_counts": dict(judge_backend_counter),
         "judge_status_counts": dict(judge_status_counter),
+        "generation_finish_reason_counts": dict(finish_reason_counter),
         "correct_counts": dict(correct_counter),
         "overall_accuracy":
         round(pct(correct_counter["true"], correct_counter["true"] +
                   correct_counter["false"]), 4)
         if (correct_counter["true"] + correct_counter["false"]) > 0 else 0.0,
+        "overlong_summary": {
+            "overlong_total": overlong_total,
+            "overlong_ratio":
+            round(pct(overlong_total, total), 4) if total else 0.0,
+            "overlong_correct": overlong_correct,
+            "overlong_accuracy":
+            round(pct(overlong_correct, overlong_total), 4)
+            if overlong_total else 0.0,
+        },
         "backend_accuracy": backend_accuracy,
         "math_backend_summary": {
             "math_total": math_total,
