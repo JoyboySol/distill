@@ -4,8 +4,13 @@ from dataclasses import dataclass
 from typing import Any, Iterable, List, Optional
 
 
-DEFAULT_URL_TEMPLATE = "http://localhost:{port}/v1"
+DEFAULT_URL_TEMPLATE = "http://127.0.0.1:{port}/v1"
 DEFAULT_PORT_RANGE = "6758-6765"
+DEFAULT_LLM_TIMEOUT = 3600.0
+DEFAULT_VLLM_LS_COMMAND_PATH = "/mnt/ssd/yulan/bin/vllm_ls"
+DEFAULT_VLLM_LS_COMMAND = os.getenv("DISTILL_VLLM_LS_COMMAND",
+                                    os.getenv("VLLM_LS_BIN",
+                                              DEFAULT_VLLM_LS_COMMAND_PATH))
 
 
 def split_text_items(raw: Any) -> List[str]:
@@ -96,6 +101,7 @@ class PipelineConfig:
     model_name: str
     api_key: Optional[str]
     base_urls: List[str]
+    vllm_ls_command: Optional[str] = DEFAULT_VLLM_LS_COMMAND
     task_name: Optional[str] = None
     config_path: Optional[str] = None
     manifest_dir: Optional[str] = None
@@ -113,7 +119,7 @@ class PipelineConfig:
     queue_max_size: int = 2000
     active_file_window: int = 6
     rollout_count: int = 1
-    llm_timeout: float = 3600
+    llm_timeout: float = DEFAULT_LLM_TIMEOUT
     llm_max_tokens: int = 7000
     segment_flush_interval_sec: float = 0.0
 

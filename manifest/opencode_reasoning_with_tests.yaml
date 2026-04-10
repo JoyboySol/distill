@@ -1,0 +1,40 @@
+model: Nanbeige4.1-3B
+ports:
+  - 1597-1601
+
+tasks:
+  - task_name: opencode_reasoning_split_0
+    input_dir: /mnt/hdd/lvzhihao/data/OpenCodeReasoning_with_tests/split_0
+    output_dir: /mnt/hdd/lvzhihao/output/OpenCodeReasoning-distill/split_0
+    failure_log: opencode_reasoning_split_0_failed.jsonl
+    file_pattern: "*.parquet"
+    input_field: input
+    label_field:
+    concurrency: 160
+    judge_concurrency: 16
+    active_files: 2
+    rollout_count: 4
+    max_tokens: 62000
+    batch_size: 1000
+    segment_size_mb: 2
+    segment_flush_interval_sec: 10
+    shard_size_mb: 200
+    write_retries: 3
+
+  # - task_name: opencode_reasoning_split_1
+  #   input_dir: /mnt/hdd/lvzhihao/data/OpenCodeReasoning_with_tests/split_1
+  #   output_dir: /mnt/hdd/lvzhihao/output/OpenCodeReasoning-distill/split_1
+  #   failure_log: opencode_reasoning_split_1_failed.jsonl
+  #   file_pattern: "*.parquet"
+  #   input_field: input
+  #   label_field:
+  #   concurrency: 256
+  #   judge_concurrency: 16
+  #   active_files: 2
+  #   rollout_count: 1
+  #   max_tokens: 62000
+  #   batch_size: 1000
+  #   segment_size_mb: 2
+  #   segment_flush_interval_sec: 10
+  #   shard_size_mb: 200
+  #   write_retries: 3

@@ -56,6 +56,14 @@ class GenerationResultItem:
 class DistillPipeline:
     STREAM_ALL = "all"
     STREAM_CORRECT = "correct"
+    OPEN_CODE_REASONING_PYTHON_WRAPPER = (
+        "Solve this problem using Python.\n"
+        "Return a Python solution that can be executed directly.\n"
+        "Use standard input and standard output.\n"
+        "Put the final answer inside a ```python``` or ```Python``` code block.\n"
+        "A brief explanation is okay, but make sure the final answer includes Python code.\n\n"
+        "Problem:\n"
+    )
 
     def __init__(self, config: PipelineConfig):
         self.config = config
@@ -90,13 +98,22 @@ class DistillPipeline:
 
     @staticmethod
     def _refresh_progress_postfix(pbar: tqdm):
+        resumed = int(getattr(pbar, "_resumed_tasks", 0))
         discovered = int(getattr(pbar, "_discovered_tasks", 0))
         written = int(getattr(pbar, "_written_tasks", 0))
         correct = int(getattr(pbar, "_correct_tasks", 0))
         overlong = int(getattr(pbar, "_overlong_tasks", 0))
+        discovered_new = max(0, discovered - resumed)
+        written_new = max(0, written - resumed)
         pbar.set_postfix_str(
-            f"discovered={discovered} written={written} correct={correct} overlong={overlong}"
-        )
+            " ".join([
+                f"resumed={resumed}",
+                f"discovered_new={discovered_new}",
+                f"written_total={written}",
+                f"written_new={written_new}",
+                f"correct={correct}",
+                f"overlong={overlong}",
+            ]))
 
     @staticmethod
     def _completed_key(source_file: str,
@@ -236,15 +253,38 @@ class DistillPipeline:
         path = self._completed_index_path()
         with open(path, "a", encoding="utf-8") as f:
             for record in records:
-                f.write(
-                    safe_json_dumps({
-                        "source_file": record["source_file"],
-                        "source_row": int(record["source_row"]),
-                        "rollout_index": int(record.get("rollout_index", 0)
-                                             or 0),
-                    }) + "\n")
+                source_file = str(record["source_file"]).replace("\t", " ")
+                source_row = int(record["source_row"])
+                rollout_index = int(record.get("rollout_index", 0) or 0)
+                f.write(f"{source_file}\t{source_row}\t{rollout_index}\n")
 
-    def _load_completed_index(self) -> Optional[Set[str]]:
+    def _parse_completed_index_line(self, line: str) -> Optional[str]:
+        text = line.strip()
+        if not text:
+            return None
+        if text.startswith("{"):
+            row = json.loads(text)
+            return self._completed_key(
+                str(row["source_file"]),
+                int(row["source_row"]),
+                int(row.get("rollout_index", 0) or 0),
+            )
+
+        parts = text.split("\t")
+        if len(parts) != 3:
+            raise ValueError(f"Invalid completed index line: {text[:200]}")
+        return self._completed_key(
+            str(parts[0]),
+            int(parts[1]),
+            int(parts[2]),
+        )
+
+    def _completed_key_source_file(self, completed_key: str) -> str:
+        return completed_key.rsplit("::", 2)[0]
+
+    def _load_completed_index(
+            self,
+            allowed_source_files: Optional[Set[str]] = None) -> Optional[Set[str]]:
         path = self._completed_index_path()
         if not os.path.exists(path):
             return None
@@ -254,13 +294,14 @@ class DistillPipeline:
                 for line in f:
                     if not line.strip():
                         continue
-                    row = json.loads(line)
-                    completed_sources.add(
-                        self._completed_key(
-                            str(row["source_file"]),
-                            int(row["source_row"]),
-                            int(row.get("rollout_index", 0) or 0),
-                        ))
+                    completed_key = self._parse_completed_index_line(line)
+                    if completed_key is None:
+                        continue
+                    if (allowed_source_files is not None
+                            and self._completed_key_source_file(completed_key)
+                            not in allowed_source_files):
+                        continue
+                    completed_sources.add(completed_key)
             return completed_sources
         except Exception as e:
             logger.warning("Failed to load completed index: %s", e)
@@ -494,16 +535,18 @@ class DistillPipeline:
             "next_shard_idx": max_shard_idx + 1,
         }
 
-    def _load_completed_records(self):
+    def _load_completed_records(self,
+                                input_files: Optional[List[str]] = None):
         if self.completed_records_loaded:
             return
 
         self.completed_records_loaded = True
         os.makedirs(self.config.output_dir, exist_ok=True)
+        allowed_source_files = set(input_files) if input_files is not None else None
 
         logger.info("Loading completed-record index for resume support...")
         resume_state = self._load_resume_state()
-        completed_index = self._load_completed_index()
+        completed_index = self._load_completed_index(allowed_source_files)
         if resume_state is not None and completed_index is not None:
             self.completed_records = completed_index
             self._load_progress_from_resume_state(resume_state)
@@ -518,11 +561,13 @@ class DistillPipeline:
                 )
                 self._save_resume_state()
             logger.info(
-                "Loaded resume state without full scan: completed=%s written=%s correct=%s overlong=%s",
+                "Loaded resume state without full scan: completed=%s written=%s correct=%s overlong=%s filter=%s",
                 len(self.completed_records),
                 self.resume_progress["written"],
                 self.resume_progress["correct"],
                 self.resume_progress["overlong"],
+                "all" if allowed_source_files is None else len(
+                    allowed_source_files),
             )
             return
 
@@ -535,11 +580,13 @@ class DistillPipeline:
                 self._load_stream_counters_lightweight()
             self._save_resume_state()
             logger.info(
-                "Recovered from completed index without full content scan: completed=%s written=%s correct=%s overlong=%s",
+                "Recovered from completed index without full content scan: completed=%s written=%s correct=%s overlong=%s filter=%s",
                 len(self.completed_records),
                 self.resume_progress["written"],
                 self.resume_progress["correct"],
                 self.resume_progress["overlong"],
+                "all" if allowed_source_files is None else len(
+                    allowed_source_files),
             )
             return
 
@@ -652,6 +699,19 @@ class DistillPipeline:
 
         return None
 
+    def _should_wrap_open_code_reasoning_prompt(self) -> bool:
+        task_name = (self.config.task_name or "").lower()
+        config_path = (self.config.config_path or "").lower()
+        input_dir = (self.config.input_dir or "").lower()
+        output_dir = (self.config.output_dir or "").lower()
+        joined = " ".join((task_name, config_path, input_dir, output_dir))
+        return "opencode_reasoning" in joined or "opencodereasoning" in joined
+
+    def _format_task_prompt(self, normalized_prompt: str) -> str:
+        if self._should_wrap_open_code_reasoning_prompt():
+            return self.OPEN_CODE_REASONING_PYTHON_WRAPPER + normalized_prompt
+        return normalized_prompt
+
     @staticmethod
     def _extract_row_dict(row: Dict[str, Any]) -> Dict[str, Any]:
         normalized = {}
@@ -684,7 +744,7 @@ class DistillPipeline:
                 yield pa.Table.from_pylist(batch_data)
 
     async def producer(self, input_files: List[str], pbar: tqdm):
-        self._load_completed_records()
+        self._load_completed_records(input_files)
         logger.info("Producer started. Total files to process in this node: %s",
                     len(input_files))
         if not input_files:
@@ -746,6 +806,8 @@ class DistillPipeline:
                         normalized_prompt = self._normalize_prompt(
                             row_data.get(self.config.input_content_field))
                         if normalized_prompt:
+                            task_prompt = self._format_task_prompt(
+                                normalized_prompt)
                             for rollout_index in range(self.config.rollout_count):
                                 if self._is_completed(source_file, source_row,
                                                       rollout_index):
@@ -761,7 +823,7 @@ class DistillPipeline:
                                         source_file=source_file,
                                         source_row=source_row,
                                         rollout_index=rollout_index,
-                                        prompt=normalized_prompt,
+                                        prompt=task_prompt,
                                         row_data=row_data,
                                     ))
                                 discovered = int(getattr(pbar, "_discovered_tasks",
@@ -1279,7 +1341,7 @@ class DistillPipeline:
             logger.error("No files matched the range criteria. Exiting.")
             return
 
-        self._load_completed_records()
+        self._load_completed_records(input_files)
 
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -1299,6 +1361,7 @@ class DistillPipeline:
             unit="task",
             dynamic_ncols=True,
         )
+        pbar._resumed_tasks = int(self.resume_progress["written"])
         pbar._discovered_tasks = int(self.resume_progress["written"])
         pbar._written_tasks = int(self.resume_progress["written"])
         pbar._correct_tasks = int(self.resume_progress["correct"])

@@ -11,7 +11,9 @@ try:
                                    resolve_manifest_dir,
                                    resolve_task_config_path,
                                    select_manifest_tasks)
-    from .runtime.settings import PipelineConfig, logger, resolve_base_urls
+    from .runtime.settings import (DEFAULT_LLM_TIMEOUT,
+                                   DEFAULT_VLLM_LS_COMMAND, PipelineConfig,
+                                   logger, resolve_base_urls)
 except ImportError:
     from runtime.manifest import (DEFAULT_MANIFEST_DIRNAME,
                                   DEFAULT_RULE_EXAMPLES_DIRNAME,
@@ -19,7 +21,9 @@ except ImportError:
                                   resolve_manifest_dir,
                                   resolve_task_config_path,
                                   select_manifest_tasks)
-    from runtime.settings import PipelineConfig, logger, resolve_base_urls
+    from runtime.settings import (DEFAULT_LLM_TIMEOUT,
+                                  DEFAULT_VLLM_LS_COMMAND, PipelineConfig,
+                                  logger, resolve_base_urls)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -32,6 +36,7 @@ DEFAULT_PIPELINE_VALUES: Dict[str, Any] = {
     "range_end": None,
     "model": "Qwen3-30B-A3B-Thinking-2507",
     "api_key": os.getenv("OPENAI_API_KEY", "EMPTY"),
+    "vllm_ls_command": DEFAULT_VLLM_LS_COMMAND,
     "base_urls": None,
     "ports": None,
     "concurrency": 2048,
@@ -40,6 +45,7 @@ DEFAULT_PIPELINE_VALUES: Dict[str, Any] = {
     "rollout_count": 1,
     "input_field": "question",
     "label_field": None,
+    "llm_timeout": DEFAULT_LLM_TIMEOUT,
     "max_tokens": 7000,
     "shard_size_mb": 200,
     "segment_size_mb": 4,
@@ -59,6 +65,7 @@ CONFIG_KEY_ALIASES = {
     "judge-concurrency": "judge_concurrency",
     "active-files": "active_files",
     "rollout-count": "rollout_count",
+    "llm-timeout": "llm_timeout",
     "max-tokens": "max_tokens",
     "shard-size-mb": "shard_size_mb",
     "segment-size-mb": "segment_size_mb",
@@ -164,6 +171,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_argument(
         parser,
+        "--vllm-ls-command",
+        type=str,
+        help=("Command used to verify whether a local vLLM process is still "
+              "alive for a given port. Example: "
+              "'/mnt/ssd/yulan/bin/vllm_ls'."),
+    )
+    _add_argument(
+        parser,
         "--base-url",
         "--base-urls",
         dest="base_urls",
@@ -186,6 +201,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--rollout-count",
         type=int,
         help="Number of independent rollouts to generate for each input sample.",
+    )
+    _add_argument(
+        parser,
+        "--llm-timeout",
+        type=float,
+        help="Per-request timeout in seconds for chat completions.",
     )
     _add_argument(
         parser,
@@ -278,6 +299,7 @@ def _build_config_from_values(values: Dict[str, Any]) -> PipelineConfig:
         model_name=values["model"],
         api_key=values["api_key"],
         base_urls=base_urls,
+        vllm_ls_command=values.get("vllm_ls_command"),
         task_name=values.get("task_name"),
         config_path=values.get("config_path"),
         manifest_dir=values.get("manifest_dir"),
@@ -285,6 +307,7 @@ def _build_config_from_values(values: Dict[str, Any]) -> PipelineConfig:
         judge_concurrency=values["judge_concurrency"],
         active_file_window=values["active_files"],
         rollout_count=values["rollout_count"],
+        llm_timeout=values["llm_timeout"],
         llm_max_tokens=values["max_tokens"],
         file_pattern=values["file_pattern"],
         range_start=values["range_start"],

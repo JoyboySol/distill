@@ -122,17 +122,24 @@
 
 ### 5.1 Code 判题
 
-当前 code 判题分两类：
+当前 code 判题分三类：
 
 - `code_mbpp`
   如果样本里有 `test_list_2` 或 `test_list`，就把模型生成的代码和测试拼起来执行。
 - `code_humaneval`
   如果样本里有 `prompt + test + entry_point` 这类字段，就走 HumanEval 风格执行。
+- `code_livecodebench_generation`
+  如果样本里有 `input_output` / `evaluation_sample`，或者带
+  `public_test_cases + private_test_cases + metadata.func_name` 这类字段，
+  就按 LiveCodeBench code generation 风格执行验证。
+- `code_prompt_examples`
+  如果样本题面里能解析出 `Example / Input / Output` 样例，并且参考解
+  `solution` 能先通过这些样例，就用题面样例做弱判题。
 
 返回结果会写成：
 
-- `judge_type = code_mbpp | code_humaneval`
-- `judge_backend = none`
+- `judge_type = code_mbpp | code_humaneval | code_livecodebench_generation | code_prompt_examples`
+- `judge_backend = none | livecodebench_v6 | prompt_examples_v1`
 - `judge_status = pass | wrong_answer | timeout | failed`
 - `is_correct = True | False`
 
@@ -666,6 +673,33 @@ http://localhost:6765/v1
 - fallback 的主要原因是什么
 - `code` 和 `math` 的判题通过率大概怎样
 - `correct` 分流里到底保留了多少条
+
+如果你在蒸馏过程中想提前把 `correct/segments` 增量合并成 parquet shard，
+并同步统计 token 总数与平均 token，可以直接运行：
+
+```bash
+/mnt/ssd/lvzhihao/PostTrain/distill/.venv/bin/python \
+  /mnt/ssd/lvzhihao/PostTrain/distill/scripts/merge_correct_segments.py \
+  --output-dir /path/to/output \
+  --stream correct \
+  --summary-path /path/to/output/correct_merge_summary.json
+```
+
+这个脚本有几个特点：
+
+- 只会处理新出现的 `segment_*.jsonl`，重复执行不会重复统计
+- 会把增量合并状态写到 `correct/external_merge_state.json`
+- 会输出累计的 `token_sums`
+- 会输出累计的 `average_tokens`
+- 适合在主蒸馏任务还没结束时周期性执行
+
+如果你只想看 `correct` 数据的平均 token，而不合并 shard，也可以运行：
+
+```bash
+/mnt/ssd/lvzhihao/PostTrain/distill/.venv/bin/python \
+  /mnt/ssd/lvzhihao/PostTrain/distill/scripts/avg_correct_tokens.py \
+  --output-dir /path/to/output
+```
 
 ## 10. 依赖说明
 

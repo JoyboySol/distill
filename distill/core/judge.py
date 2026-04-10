@@ -5,6 +5,17 @@ import re
 import signal
 from typing import Any, Dict, List, Optional
 
+try:
+    from .livecodebench import (build_livecodebench_sample,
+                                evaluate_livecodebench_generation)
+    from .prompt_examples import (build_prompt_example_sample,
+                                  reference_solution_text)
+except ImportError:
+    from core.livecodebench import (build_livecodebench_sample,
+                                    evaluate_livecodebench_generation)
+    from core.prompt_examples import (build_prompt_example_sample,
+                                      reference_solution_text)
+
 
 class TimeOutException(Exception):
     pass
@@ -461,9 +472,95 @@ def assistant_text(messages: List[Dict[str, Any]]) -> str:
     return ""
 
 
+def _fenced_code_blocks(text: str) -> List[Dict[str, str]]:
+    blocks = re.findall(r"```([A-Za-z0-9_+#-]*)\s*\n(.*?)```", text,
+                        re.DOTALL)
+    return [{
+        "lang": (lang or "").strip(),
+        "code": code.lstrip(),
+    } for lang, code in blocks]
+
+
+def _python_block_score(code: str) -> int:
+    text = code.strip()
+    lower = text.lower()
+    score = 0
+
+    positive_patterns = (
+        "def ",
+        "print(",
+        "input(",
+        "sys.stdin",
+        "sys.stdout",
+        "map(int",
+        "for _ in range",
+        "elif ",
+        "__name__ ==",
+        "import sys",
+        "from collections",
+    )
+    score += sum(1 for pattern in positive_patterns if pattern in lower)
+
+    if "class solution" in lower:
+        score += 2
+    if text.count("\n") >= 2:
+        score += 1
+
+    negative_patterns = (
+        "#include <",
+        "using namespace std",
+        "int main(",
+        "std::",
+        "public static void main",
+        "system.out.",
+        "scanner ",
+        "bufferedreader",
+        "package main",
+        "func main()",
+        "fmt.",
+        "fn main()",
+        "println!",
+    )
+    score -= sum(3 for pattern in negative_patterns if pattern in lower)
+
+    if re.fullmatch(r"[\d\s\.\-]+", text):
+        score -= 5
+
+    return score
+
+
+def _best_python_like_block(text: str, prefer_last: bool) -> Optional[str]:
+    blocks = _fenced_code_blocks(text)
+    if not blocks:
+        return None
+
+    candidates = []
+    for idx, block in enumerate(blocks):
+        lang = block["lang"].lower()
+        if lang in {"python", "py"}:
+            candidates.append((1000 + idx, idx, block["code"]))
+            continue
+        score = _python_block_score(block["code"])
+        if score > 0:
+            candidates.append((score, idx, block["code"]))
+
+    if not candidates:
+        return None
+
+    if prefer_last:
+        _, _, code = max(candidates, key=lambda item: (item[0], item[1]))
+    else:
+        _, _, code = max(candidates, key=lambda item: (item[0], -item[1]))
+    return code
+
+
 def extract_code_text(text: str) -> str:
+    best_block = _best_python_like_block(text, prefer_last=False)
+    if best_block is not None:
+        return best_block
+
     blocks = re.findall(r"```\w*\n(.*?)```", text, re.DOTALL)
-    if len(blocks) >= 1:
+    if blocks:
         return blocks[0].lstrip()
 
     patterns = [
@@ -483,6 +580,17 @@ def extract_code_text(text: str) -> str:
             extracted = re.split(r"'?\s*\[?DONE\]?", extracted)[0]
             return extracted.replace("\\_", "_").strip()
     return text.strip()
+
+
+def extract_code_text_last_block(text: str) -> str:
+    best_block = _best_python_like_block(text, prefer_last=True)
+    if best_block is not None:
+        return best_block
+
+    blocks = re.findall(r"```(?:\w+)?\n(.*?)```", text, re.DOTALL)
+    if blocks:
+        return blocks[-1].lstrip()
+    return extract_code_text(text)
 
 
 def try_math_reference(row_data: Dict[str, Any],
@@ -510,6 +618,91 @@ def try_math_reference(row_data: Dict[str, Any],
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
+
+def _looks_like_code_text(text: Optional[str]) -> bool:
+    if not isinstance(text, str) or not text.strip():
+        return False
+    lower = text.lower()
+    indicators = (
+        "def ",
+        "print(",
+        "input(",
+        "sys.stdin",
+        "sys.stdout",
+        "map(int",
+        "for _ in range",
+        "class solution",
+        "__name__ ==",
+        "#include <",
+        "using namespace std",
+        "public static void main",
+        "system.out.",
+        "func main()",
+        "package main",
+    )
+    return any(indicator in lower for indicator in indicators)
+
+
+def _looks_like_code_task(row_data: Dict[str, Any]) -> bool:
+    direct_code_fields = (
+        "input_output",
+        "evaluation_sample",
+        "public_test_cases",
+        "private_test_cases",
+        "test",
+        "test_list",
+        "test_list_2",
+        "entry_point",
+    )
+    if any(row_data.get(field) for field in direct_code_fields):
+        return True
+
+    metadata_text = " ".join(
+        str(row_data.get(field) or "")
+        for field in ("dataset", "dataset_name", "source_dataset", "source")
+    ).lower()
+    code_dataset_markers = (
+        "code_contests",
+        "codeforces",
+        "codechef",
+        "atcoder",
+        "hackerrank",
+        "hackerearth",
+        "aizu",
+        "kattis",
+        "leetcode",
+        "geeksforgeeks",
+        "codewars",
+        "humaneval",
+        "mbpp",
+        "livecodebench",
+        "opencode",
+    )
+    if any(marker in metadata_text for marker in code_dataset_markers):
+        return True
+
+    for field in ("solution", "reference_solution", "canonical_solution",
+                  "ground_truth_solution", "output"):
+        if _looks_like_code_text(row_data.get(field)):
+            return True
+
+    prompt_text = row_data.get("input") or row_data.get("prompt") or row_data.get(
+        "question")
+    if isinstance(prompt_text, str):
+        prompt_lower = prompt_text.lower()
+        prompt_markers = (
+            "write a program",
+            "standard input",
+            "standard output",
+            "input:",
+            "output:",
+            "constraints",
+        )
+        if any(marker in prompt_lower for marker in prompt_markers):
+            return True
+
+    return False
 
 
 def build_humaneval_program(row_data: Dict[str, Any],
@@ -557,6 +750,70 @@ def judge_output(row_data: Dict[str, Any],
             "judge_status": status,
             "judge_detail": {
                 "timeout_seconds": 10
+            },
+        }
+
+    livecodebench_sample = build_livecodebench_sample(row_data)
+    if livecodebench_sample:
+        lcb_result = evaluate_livecodebench_generation(
+            livecodebench_sample,
+            extract_code_text_last_block(content),
+            timeout=6,
+        )
+        return {
+            "judge_type": "code_livecodebench_generation",
+            "judge_backend": "livecodebench_v6",
+            "is_correct": lcb_result["is_correct"],
+            "judge_status": lcb_result["status"],
+            "judge_detail": lcb_result["detail"],
+        }
+
+    prompt_example_sample = build_prompt_example_sample(row_data)
+    if prompt_example_sample:
+        detail: Dict[str, Any] = {
+            "example_count": len(prompt_example_sample["inputs"]),
+            "test_source": prompt_example_sample.get("source"),
+        }
+        reference_solution = reference_solution_text(row_data)
+        if reference_solution:
+            oracle_result = evaluate_livecodebench_generation(
+                prompt_example_sample,
+                reference_solution,
+                timeout=6,
+            )
+            detail["oracle_status"] = oracle_result["status"]
+            detail["oracle_detail"] = oracle_result["detail"]
+            if not oracle_result["is_correct"]:
+                return {
+                    "judge_type": "code_prompt_examples",
+                    "judge_backend": "prompt_examples_v1",
+                    "is_correct": None,
+                    "judge_status": "not_applicable",
+                    "judge_detail": detail,
+                }
+
+        prompt_result = evaluate_livecodebench_generation(
+            prompt_example_sample,
+            extract_code_text_last_block(content),
+            timeout=6,
+        )
+        detail.update(prompt_result["detail"])
+        return {
+            "judge_type": "code_prompt_examples",
+            "judge_backend": "prompt_examples_v1",
+            "is_correct": prompt_result["is_correct"],
+            "judge_status": prompt_result["status"],
+            "judge_detail": detail,
+        }
+
+    if _looks_like_code_task(row_data):
+        return {
+            "judge_type": "code_unverified",
+            "judge_backend": "code_safeguard_v1",
+            "is_correct": None,
+            "judge_status": "not_applicable",
+            "judge_detail": {
+                "reason": "code_task_without_reliable_tests",
             },
         }
 
