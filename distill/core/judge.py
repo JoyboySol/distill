@@ -1,6 +1,7 @@
 import contextlib
 import io
 import multiprocessing
+import queue
 import re
 import signal
 from typing import Any, Dict, List, Optional
@@ -18,6 +19,10 @@ except ImportError:
 
 
 class TimeOutException(Exception):
+    pass
+
+
+class JudgeSubprocessTimeoutError(TimeoutError):
     pass
 
 
@@ -718,9 +723,9 @@ def build_humaneval_program(row_data: Dict[str, Any],
     return program
 
 
-def judge_output(row_data: Dict[str, Any],
-                 messages: List[Dict[str, Any]],
-                 label_field: Optional[str] = None) -> Dict[str, Any]:
+def _judge_output_impl(row_data: Dict[str, Any],
+                       messages: List[Dict[str, Any]],
+                       label_field: Optional[str] = None) -> Dict[str, Any]:
     content = assistant_text(messages)
 
     code_test = row_data.get("test_list_2") or row_data.get("test_list")
@@ -874,3 +879,136 @@ def judge_output(row_data: Dict[str, Any],
         "judge_status": "not_applicable",
         "judge_detail": None,
     }
+
+
+def judge_output(row_data: Dict[str, Any],
+                 messages: List[Dict[str, Any]],
+                 label_field: Optional[str] = None) -> Dict[str, Any]:
+    return _judge_output_impl(row_data, messages, label_field)
+
+
+def _judge_type_hint(row_data: Dict[str, Any],
+                     messages: List[Dict[str, Any]],
+                     label_field: Optional[str] = None) -> Optional[str]:
+    code_test = row_data.get("test_list_2") or row_data.get("test_list")
+    if isinstance(code_test, list):
+        code_test = "\n".join(str(x) for x in code_test)
+    if isinstance(code_test, str) and code_test.strip():
+        return "code_mbpp"
+
+    humaneval_program = build_humaneval_program(row_data,
+                                                extract_code_text(
+                                                    assistant_text(messages)))
+    if humaneval_program:
+        return "code_humaneval"
+
+    if build_livecodebench_sample(row_data):
+        return "code_livecodebench_generation"
+
+    if build_prompt_example_sample(row_data):
+        return "code_prompt_examples"
+
+    if _looks_like_code_task(row_data):
+        return "code_unverified"
+
+    if try_math_reference(row_data, preferred_field=label_field) is not None:
+        return "math"
+
+    return None
+
+
+def _guarded_judge_result(row_data: Dict[str, Any],
+                          messages: List[Dict[str, Any]],
+                          label_field: Optional[str],
+                          judge_status: str,
+                          detail: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "judge_type": _judge_type_hint(row_data, messages, label_field),
+        "judge_backend": "judge_subprocess_guard_v1",
+        "is_correct": None,
+        "judge_status": judge_status,
+        "judge_detail": detail,
+    }
+
+
+def _judge_output_process_entry(result_queue,
+                                row_data: Dict[str, Any],
+                                messages: List[Dict[str, Any]],
+                                label_field: Optional[str]):
+    try:
+        result_queue.put({
+            "ok": True,
+            "result": _judge_output_impl(row_data, messages, label_field),
+        })
+    except BaseException as exc:
+        result_queue.put({
+            "ok": False,
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+        })
+
+
+def judge_output_with_timeout(
+    row_data: Dict[str, Any],
+    messages: List[Dict[str, Any]],
+    label_field: Optional[str] = None,
+    timeout: Optional[float] = 20.0,
+) -> Dict[str, Any]:
+    if timeout is None or timeout <= 0:
+        return _judge_output_impl(row_data, messages, label_field)
+
+    ctx = multiprocessing.get_context("spawn")
+    result_queue = ctx.Queue(maxsize=1)
+    process = ctx.Process(
+        target=_judge_output_process_entry,
+        args=(result_queue, row_data, messages, label_field),
+    )
+    process.start()
+
+    try:
+        process.join(timeout=timeout)
+        if process.is_alive():
+            process.kill()
+            process.join()
+            return _guarded_judge_result(
+                row_data,
+                messages,
+                label_field,
+                "timeout",
+                {
+                    "reason": "judge_process_timeout",
+                    "timeout_seconds": timeout,
+                },
+            )
+
+        try:
+            payload = result_queue.get_nowait()
+        except queue.Empty:
+            return _guarded_judge_result(
+                row_data,
+                messages,
+                label_field,
+                "failed",
+                {
+                    "reason": "judge_process_no_result",
+                    "exitcode": process.exitcode,
+                },
+            )
+
+        if payload.get("ok"):
+            return payload["result"]
+
+        return _guarded_judge_result(
+            row_data,
+            messages,
+            label_field,
+            "failed",
+            {
+                "reason": "judge_process_error",
+                "error_type": payload.get("error_type"),
+                "error_message": payload.get("error_message"),
+            },
+        )
+    finally:
+        result_queue.close()
+        result_queue.join_thread()

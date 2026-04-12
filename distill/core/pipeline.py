@@ -18,14 +18,16 @@ try:
     from ..runtime.settings import PipelineConfig, logger
     from ..common.utils import ensure_message_shape, safe_json_dumps
     from .failure import FailureRecorder
-    from .judge import judge_output
-    from .llm import AsyncLLMManager, GenerationResponse
+    from .judge import judge_output_with_timeout
+    from .llm import (AsyncLLMManager, GenerationResponse,
+                      NoHealthyBackendsError)
 except ImportError:
     from runtime.settings import PipelineConfig, logger
     from common.utils import ensure_message_shape, safe_json_dumps
     from core.failure import FailureRecorder
-    from core.judge import judge_output
-    from core.llm import AsyncLLMManager, GenerationResponse
+    from core.judge import judge_output_with_timeout
+    from core.llm import (AsyncLLMManager, GenerationResponse,
+                          NoHealthyBackendsError)
 
 
 @dataclass
@@ -920,10 +922,11 @@ class DistillPipeline:
     ) -> Dict[str, Any]:
         messages = [ensure_message_shape(message) for message in messages]
         dataset_name = self._dataset_name(task.row_data, task.source_file)
-        judge_result = judge_output(
+        judge_result = judge_output_with_timeout(
             task.row_data,
             messages,
             label_field=self.config.label_field,
+            timeout=self.config.judge_timeout_sec,
         )
 
         return {
@@ -982,6 +985,16 @@ class DistillPipeline:
                         usage=response.get("usage") or {},
                     ))
 
+            except NoHealthyBackendsError as e:
+                logger.error(
+                    "Fatal backend outage in worker %s for %s row %s: %s",
+                    worker_id,
+                    item.source_file,
+                    item.source_row,
+                    e,
+                )
+                self._request_stop("all_vllm_backends_terminated")
+                raise
             except APITimeoutError:
                 logger.warning("TIMEOUT: %s row %s", item.source_file,
                                item.source_row)
@@ -1040,7 +1053,8 @@ class DistillPipeline:
                 break
 
             try:
-                record = self._build_output_record(
+                record = await asyncio.to_thread(
+                    self._build_output_record,
                     item.task,
                     item.messages,
                     item.finish_reason,
@@ -1380,7 +1394,23 @@ class DistillPipeline:
         ]
 
         try:
-            await producer_task
+            producer_and_generation_tasks = {
+                producer_task,
+                *generation_workers,
+            }
+            while True:
+                done, _ = await asyncio.wait(
+                    producer_and_generation_tasks,
+                    return_when=asyncio.FIRST_EXCEPTION,
+                )
+                task_error = next(
+                    (task.exception() for task in done if task.exception() is not None),
+                    None,
+                )
+                if task_error is not None:
+                    raise task_error
+                if producer_task in done:
+                    break
             for _ in generation_workers:
                 await self.task_queue.put(None)
             await self._wait_tasks(generation_workers, "generation")
@@ -1390,6 +1420,17 @@ class DistillPipeline:
             await self._wait_tasks(judge_workers, "judge")
             await self.result_queue.put(None)
             await self._wait_task(writer_task, "writer")
+        except Exception:
+            self.stop_requested = True
+            tasks_to_cancel = []
+            for task in [producer_task, *generation_workers, *judge_workers,
+                         writer_task]:
+                if not task.done():
+                    task.cancel()
+                    tasks_to_cancel.append(task)
+            if tasks_to_cancel:
+                await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
+            raise
         finally:
             for sig in (signal.SIGINT, signal.SIGTERM):
                 try:

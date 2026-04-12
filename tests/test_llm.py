@@ -1,13 +1,16 @@
 import asyncio
 import unittest
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 from openai import APIConnectionError
 
 from distill.core.llm import (AsyncLLMManager, BackendState,
+                              NoHealthyBackendsError,
                               _is_loopback_base_url,
                               _scaled_concurrency_limit)
+from distill.core.pipeline import DistillPipeline, TaskItem
 from distill.runtime.settings import (DEFAULT_URL_TEMPLATE, PipelineConfig,
                                       resolve_base_urls)
 
@@ -228,6 +231,97 @@ class AsyncLLMManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(successful_calls, 1)
         self.assertTrue(manager.backends[0].active)
         self.assertTrue(manager.backends[1].active)
+
+    async def test_generate_raises_fatal_error_when_vllm_ls_confirms_all_gone(
+            self):
+        config = PipelineConfig(
+            input_dir="in",
+            output_dir="out",
+            failure_log="failure.jsonl",
+            model_name="test-model",
+            api_key="EMPTY",
+            vllm_ls_command="/mnt/ssd/yulan/bin/vllm_ls",
+            base_urls=[
+                "http://127.0.0.1:20001/v1",
+                "http://127.0.0.1:20002/v1",
+            ],
+            max_concurrency=8,
+        )
+        manager = AsyncLLMManager(config)
+
+        async def fail_handler(**kwargs):
+            raise APIConnectionError(
+                message="backend down",
+                request=httpx.Request(
+                    "POST",
+                    "http://127.0.0.1:20001/v1/chat/completions",
+                ),
+            )
+
+        manager.backends = [
+            BackendState(
+                base_url="http://127.0.0.1:20001/v1",
+                client=_FakeClient(fail_handler),
+            ),
+            BackendState(
+                base_url="http://127.0.0.1:20002/v1",
+                client=_FakeClient(fail_handler),
+            ),
+        ]
+
+        async def no_sleep(attempt: int):
+            return None
+
+        async def backend_process_present(base_url: str):
+            return False
+
+        manager._retry_sleep = no_sleep
+        manager._backend_process_present = backend_process_present
+
+        with self.assertRaises(NoHealthyBackendsError):
+            await manager.generate("hello")
+
+        self.assertFalse(manager.backends[0].active)
+        self.assertFalse(manager.backends[1].active)
+
+
+class PipelineFatalBackendOutageTests(unittest.IsolatedAsyncioTestCase):
+
+    async def test_worker_stops_pipeline_without_recording_failure_when_all_backends_die(
+            self):
+        config = PipelineConfig(
+            input_dir="in",
+            output_dir="out",
+            failure_log="failure.jsonl",
+            model_name="test-model",
+            api_key="EMPTY",
+            base_urls=["http://127.0.0.1:20001/v1"],
+            max_concurrency=1,
+        )
+        pipeline = DistillPipeline(config)
+        pipeline.failure_recorder.record_failure = AsyncMock()
+        pipeline.llm_manager.generate = AsyncMock(
+            side_effect=NoHealthyBackendsError("all backends gone"))
+
+        class _Pbar:
+
+            def update(self, n):
+                return None
+
+        await pipeline.task_queue.put(
+            TaskItem(
+                source_file="/tmp/input.parquet",
+                source_row=12,
+                rollout_index=0,
+                prompt="hello",
+                row_data={"question": "hello"},
+            ))
+
+        with self.assertRaises(NoHealthyBackendsError):
+            await pipeline.worker(0, _Pbar())
+
+        pipeline.failure_recorder.record_failure.assert_not_awaited()
+        self.assertTrue(pipeline.stop_requested)
 
 
 if __name__ == "__main__":

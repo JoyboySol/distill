@@ -128,11 +128,12 @@ class AsyncLLMManager:
                 backend.pending_count -= 1
             self._state_cond.notify_all()
 
-    async def _mark_backend_unhealthy(self, backend_idx: int, exc: Exception):
+    async def _mark_backend_unhealthy(self, backend_idx: int,
+                                      exc: Exception) -> int:
         async with self._state_cond:
             backend = self.backends[backend_idx]
             if not backend.active:
-                return
+                return sum(1 for item in self.backends if item.active)
             backend.active = False
             active_count = sum(1 for item in self.backends if item.active)
             new_limit = _scaled_concurrency_limit(self.max_concurrency,
@@ -149,6 +150,7 @@ class AsyncLLMManager:
                 self.max_concurrency,
             )
             self._state_cond.notify_all()
+            return active_count
 
     def _port_for_base_url(self, base_url: str) -> Optional[int]:
         parsed = urlparse(base_url)
@@ -287,7 +289,12 @@ class AsyncLLMManager:
                     backend_present = await self._backend_process_present(
                         backend.base_url)
                     if backend_present is False:
-                        await self._mark_backend_unhealthy(backend_idx, exc)
+                        active_count = await self._mark_backend_unhealthy(
+                            backend_idx, exc)
+                        if active_count == 0:
+                            raise NoHealthyBackendsError(
+                                "All configured vLLM backends disappeared from vllm_ls output."
+                            ) from exc
                     elif backend_present is True:
                         logger.warning(
                             "Keeping backend active after APIConnectionError because vllm_ls still reports it alive: %s",

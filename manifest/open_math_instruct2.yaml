@@ -1,0 +1,28 @@
+task_name: open_math_instruct2
+
+input_dir: /mnt/hdd/lvzhihao/data/OpenMathInstruct-2/data
+output_dir: /mnt/hdd/lvzhihao/output/OpenMathInstruct-2
+failure_log: open_math_failed.jsonl
+
+file_pattern: train-*.parquet
+input_field: problem
+label_field: expected_answer
+
+model: Nanbeige4.1-3B
+ports:
+  - 6758-6765
+
+concurrency: 2048
+judge_concurrency: 16
+active_files: 32
+rollout_count: 4
+max_tokens: 16000
+batch_size: 1000
+
+segment_size_mb: 1
+segment_flush_interval_sec: 10
+shard_size_mb: 200
+write_retries: 3
+
+range_start: 0
+range_end:

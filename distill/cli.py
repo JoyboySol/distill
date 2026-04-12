@@ -41,6 +41,7 @@ DEFAULT_PIPELINE_VALUES: Dict[str, Any] = {
     "ports": None,
     "concurrency": 2048,
     "judge_concurrency": 32,
+    "judge_timeout_sec": 20.0,
     "active_files": 6,
     "rollout_count": 1,
     "input_field": "question",
@@ -63,6 +64,7 @@ CONFIG_KEY_ALIASES = {
     "range-end": "range_end",
     "api-key": "api_key",
     "judge-concurrency": "judge_concurrency",
+    "judge-timeout-sec": "judge_timeout_sec",
     "active-files": "active_files",
     "rollout-count": "rollout_count",
     "llm-timeout": "llm_timeout",
@@ -195,6 +197,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_argument(parser, "--concurrency", type=int)
     _add_argument(parser, "--judge-concurrency", type=int)
+    _add_argument(parser, "--judge-timeout-sec", type=float)
     _add_argument(parser, "--active-files", type=int)
     _add_argument(
         parser,
@@ -305,6 +308,7 @@ def _build_config_from_values(values: Dict[str, Any]) -> PipelineConfig:
         manifest_dir=values.get("manifest_dir"),
         max_concurrency=values["concurrency"],
         judge_concurrency=values["judge_concurrency"],
+        judge_timeout_sec=values["judge_timeout_sec"],
         active_file_window=values["active_files"],
         rollout_count=values["rollout_count"],
         llm_timeout=values["llm_timeout"],

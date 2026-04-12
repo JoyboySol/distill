@@ -20,12 +20,14 @@ class CliConfigTests(unittest.TestCase):
         values.update({
             "ports": "1597-1598",
             "llm_timeout": 7200,
+            "judge_timeout_sec": 45,
             "vllm_ls_command": "ps -eo args=",
         })
 
         config = _build_config_from_values(values)
 
         self.assertEqual(config.llm_timeout, 7200)
+        self.assertEqual(config.judge_timeout_sec, 45)
         self.assertEqual(config.vllm_ls_command, "ps -eo args=")
         self.assertEqual(config.base_urls, [
             "http://127.0.0.1:1597/v1",

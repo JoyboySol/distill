@@ -1,7 +1,8 @@
 import json
 import unittest
 
-from distill.core.judge import extract_code_text_last_block, judge_output
+from distill.core.judge import (extract_code_text_last_block, judge_output,
+                                judge_output_with_timeout)
 
 
 class LiveCodeBenchJudgeTests(unittest.TestCase):
@@ -92,6 +93,26 @@ class LiveCodeBenchJudgeTests(unittest.TestCase):
         self.assertEqual(result["judge_status"], "pass")
         self.assertEqual(result["judge_detail"]["test_source"],
                          "public_private_test_cases")
+
+    def test_timeout_guard_matches_direct_judge_for_simple_case(self):
+        row_data = {
+            "input_output": json.dumps({
+                "inputs": ["1\n2", "5\n7"],
+                "outputs": ["3", "12"],
+                "fn_name": "add",
+            })
+        }
+        messages = [{
+            "role": "assistant",
+            "content": "```python\ndef add(a, b):\n    return a + b\n```",
+        }]
+
+        direct = judge_output(row_data, messages)
+        guarded = judge_output_with_timeout(row_data,
+                                            messages,
+                                            timeout=20)
+
+        self.assertEqual(guarded, direct)
 
     def test_existing_mbpp_path_keeps_priority(self):
         row_data = {

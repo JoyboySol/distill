@@ -116,6 +116,7 @@ class PipelineConfig:
 
     max_concurrency: int = 64
     judge_concurrency: int = 16
+    judge_timeout_sec: float = 20.0
     queue_max_size: int = 2000
     active_file_window: int = 6
     rollout_count: int = 1
