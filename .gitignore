@@ -39,3 +39,5 @@ Thumbs.db
 
 *.jsonl
 .port_locks/
+.venv/
+.venv/
