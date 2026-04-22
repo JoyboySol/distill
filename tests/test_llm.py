@@ -100,6 +100,38 @@ def _build_response(content: str):
 
 class AsyncLLMManagerTests(unittest.IsolatedAsyncioTestCase):
 
+    async def test_generate_strips_none_fields_from_outbound_messages(self):
+        config = PipelineConfig(
+            input_dir="in",
+            output_dir="out",
+            failure_log="failure.jsonl",
+            model_name="test-model",
+            api_key="EMPTY",
+            base_urls=["http://127.0.0.1:20001/v1"],
+            max_concurrency=1,
+        )
+        manager = AsyncLLMManager(config)
+        captured_messages = []
+
+        async def handler(**kwargs):
+            captured_messages.extend(kwargs["messages"])
+            return _build_response("ok")
+
+        manager.backends = [
+            BackendState(
+                base_url="http://127.0.0.1:20001/v1",
+                client=_FakeClient(handler),
+            ),
+        ]
+
+        response = await manager.generate("hello")
+
+        self.assertEqual(response["messages"][1]["content"], "ok")
+        self.assertEqual(captured_messages, [{
+            "role": "user",
+            "content": "hello",
+        }])
+
     async def test_generate_stops_using_backend_only_when_vllm_ls_confirms_absent(
             self):
         config = PipelineConfig(

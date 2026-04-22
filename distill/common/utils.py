@@ -17,6 +17,15 @@ def ensure_message_shape(message: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def compact_message_payload(message: Dict[str, Any]) -> Dict[str, Any]:
+    compacted: Dict[str, Any] = {}
+    for key, value in ensure_message_shape(message).items():
+        if value is None:
+            continue
+        compacted[key] = value
+    return compacted
+
+
 def usage_to_dict(usage: Any) -> Dict[str, Any]:
     if usage is None:
         return {}

@@ -13,10 +13,12 @@ from openai import APIConnectionError, AsyncOpenAI, RateLimitError
 
 try:
     from ..runtime.settings import PipelineConfig, logger
-    from ..common.utils import ensure_message_shape, usage_to_dict
+    from ..common.utils import (compact_message_payload, ensure_message_shape,
+                                usage_to_dict)
 except ImportError:
     from runtime.settings import PipelineConfig, logger
-    from common.utils import ensure_message_shape, usage_to_dict
+    from common.utils import (compact_message_payload, ensure_message_shape,
+                              usage_to_dict)
 
 
 class GenerationResponse(Dict[str, Any]):
@@ -253,8 +255,43 @@ class AsyncLLMManager:
         logger.warning("Retrying LLM request in %ss", delay)
         await asyncio.sleep(delay)
 
-    async def generate_with_retry(self,
-                                  prompt: str) -> Optional[GenerationResponse]:
+    async def _chat_completion_create(self, backend: BackendState,
+                                      messages: List[Dict[str, Any]]):
+        payload_messages = [
+            compact_message_payload(message) for message in messages
+        ]
+        return await backend.client.chat.completions.create(
+            model=self.model,
+            messages=payload_messages,
+            temperature=0.2,
+            max_tokens=self.max_tokens,
+            timeout=self.timeout,
+            top_p=0.95,
+            extra_body={
+                "chat_template_kwargs": {
+                    "enable_thinking": False
+                }
+            },
+        )
+
+    @staticmethod
+    def _assistant_message_from_response(response: Any) -> Optional[Dict[str, Any]]:
+        choice = response.choices[0]
+        if choice.message.content is None:
+            logger.warning("Got None content! Raw response %s", choice)
+            return None
+        return ensure_message_shape({
+            "role": "assistant",
+            "content": choice.message.content,
+            "reasoning_content": getattr(choice.message, "reasoning_content",
+                                         None),
+            "tool_calls": getattr(choice.message, "tool_calls", None),
+            "tool_call_id": getattr(choice.message, "tool_call_id", None),
+            "name": getattr(choice.message, "name", None),
+        })
+
+    async def generate_messages_with_retry(
+            self, messages: List[Dict[str, Any]]) -> Optional[GenerationResponse]:
         last_exc: Optional[Exception] = None
         max_attempts = 5
 
@@ -265,19 +302,8 @@ class AsyncLLMManager:
             try:
                 backend_idx, backend = await self._acquire_backend()
                 try:
-                    response = await backend.client.chat.completions.create(
-                        model=self.model,
-                        messages=[{"role": "user", "content": prompt}],
-                        temperature=0.2,
-                        max_tokens=self.max_tokens,
-                        timeout=self.timeout,
-                        top_p=0.95,
-                        extra_body={
-                            "chat_template_kwargs": {
-                                "enable_thinking": False
-                            }
-                        },
-                    )
+                    response = await self._chat_completion_create(
+                        backend, messages)
                 except APIConnectionError as exc:
                     last_exc = exc
                     logger.warning(
@@ -336,32 +362,13 @@ class AsyncLLMManager:
                     )
                     raise
 
-                choice = response.choices[0]
-                if choice.message.content is None:
-                    logger.warning("Got None content! Raw response %s", choice)
+                assistant_msg = self._assistant_message_from_response(response)
+                if assistant_msg is None:
                     return None
-
-                assistant_msg = ensure_message_shape({
-                    "role": "assistant",
-                    "content": choice.message.content,
-                    "reasoning_content": getattr(choice.message,
-                                                 "reasoning_content", None),
-                    "tool_calls": getattr(choice.message, "tool_calls", None),
-                    "tool_call_id": getattr(choice.message, "tool_call_id", None),
-                    "name": getattr(choice.message, "name", None),
-                })
-
-                user_msg = ensure_message_shape({
-                    "role": "user",
-                    "content": prompt,
-                    "reasoning_content": None,
-                    "tool_calls": None,
-                    "tool_call_id": None,
-                    "name": None,
-                })
                 return {
-                    "messages": [user_msg, assistant_msg],
-                    "finish_reason": getattr(choice, "finish_reason", None),
+                    "assistant_message": assistant_msg,
+                    "finish_reason":
+                    getattr(response.choices[0], "finish_reason", None),
                     "usage": usage_to_dict(getattr(response, "usage", None)),
                 }
             finally:
@@ -372,6 +379,30 @@ class AsyncLLMManager:
         if last_exc is not None:
             raise last_exc
         raise RuntimeError("LLM generation failed without a captured exception")
+
+    async def generate_with_retry(self,
+                                  prompt: str) -> Optional[GenerationResponse]:
+        user_msg = ensure_message_shape({
+            "role": "user",
+            "content": prompt,
+            "reasoning_content": None,
+            "tool_calls": None,
+            "tool_call_id": None,
+            "name": None,
+        })
+        response = await self.generate_messages_with_retry([user_msg])
+        if response is None:
+            return None
+        return {
+            "messages": [user_msg, response["assistant_message"]],
+            "finish_reason": response.get("finish_reason"),
+            "usage": response.get("usage") or {},
+        }
+
+    async def generate_messages(self,
+                                messages: List[Dict[str, Any]]
+                                ) -> Optional[GenerationResponse]:
+        return await self.generate_messages_with_retry(messages)
 
     async def generate(self, prompt: str) -> Optional[GenerationResponse]:
         return await self.generate_with_retry(prompt)
