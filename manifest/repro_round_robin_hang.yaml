@@ -1,0 +1,46 @@
+model: Nanbeige4.1-3B
+ports:
+  - 22778,24494,30790,32424,24236,26944
+
+concurrency: 4
+judge_concurrency: 2
+active_files: 2
+rollout_count: 1
+max_tokens: 1024
+batch_size: 128
+
+segment_size_mb: 1
+segment_flush_interval_sec: 2
+shard_size_mb: 16
+write_retries: 1
+
+task_schedule: round_robin
+round_robin_chunk_size: 1
+
+merge_every_n_writes: 1
+upload_every_n_merges: 1
+upload_merged_shards: false
+treat_no_judge_as_correct: true
+
+tasks:
+  - task_name: repro_python_code_dataset_500k
+    input_dir: /mnt/hdd/lvzhihao/data/python-code-dataset-500k
+    output_dir: /tmp/distill_repro/python-code-dataset-500k
+    failure_log: repro_python_code_dataset_500k_failed.jsonl
+    file_pattern: data/*.parquet
+    judge_mode: none
+    input_field: instruction
+    range_start: 0
+    range_end: 1
+    sample_limit: 2
+
+  - task_name: repro_codex_7m_non_thinking
+    input_dir: /mnt/hdd/lvzhihao/data/CodeX-7M-Non-Thinking
+    output_dir: /tmp/distill_repro/CodeX-7M-Non-Thinking
+    failure_log: repro_codex_7m_non_thinking_failed.jsonl
+    file_pattern: data/*.parquet
+    judge_mode: none
+    input_field: input
+    range_start: 0
+    range_end: 1
+    sample_limit: 2

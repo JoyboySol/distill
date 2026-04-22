@@ -1,0 +1,82 @@
+# Edit the shared serving/model settings below as needed.
+model: Nanbeige4.1-3B
+ports:
+  - 6758-6765
+
+concurrency: 768
+judge_concurrency: 32
+active_files: 6
+rollout_count: 1
+max_tokens: 16000
+batch_size: 1000
+
+segment_size_mb: 4
+segment_flush_interval_sec: 10
+shard_size_mb: 200
+write_retries: 3
+
+# Multi-task scheduling:
+task_schedule: round_robin
+round_robin_chunk_size: 500
+
+# Periodic local merge / remote upload:
+merge_every_n_writes:
+upload_every_n_merges:
+upload_merged_shards: true
+treat_no_judge_as_correct: true
+hf_repo_id: JoyboyGo/hf_data
+hf_repo_type: dataset
+hf_remote_prefix:
+hf_token:
+
+tasks:
+  - task_name: python_code_dataset_500k
+    input_dir: /mnt/hdd/lvzhihao/data/python-code-dataset-500k
+    output_dir: /mnt/hdd/lvzhihao/output/distill/python-code-dataset-500k
+    failure_log: python_code_dataset_500k_failed.jsonl
+    file_pattern: data/*.parquet
+    judge_mode: none
+    input_field: instruction
+    range_start: 0
+    range_end:
+    sample_limit: 40000
+    rollout_count: 2
+    # Pure instruction/code data, no judge.
+
+
+  - task_name: codex_7m_non_thinking
+    input_dir: /mnt/hdd/lvzhihao/data/CodeX-7M-Non-Thinking
+    output_dir: /mnt/hdd/lvzhihao/output/distill/CodeX-7M-Non-Thinking
+    failure_log: codex_7m_non_thinking_failed.jsonl
+    file_pattern: data/*.parquet
+    judge_mode: none
+    input_field: input
+    range_start: 0
+    range_end:
+    sample_limit: 10000
+    rollout_count: 2
+    # Pure instruction/code data, no judge.
+
+  - task_name: nemotron_stem_mcq
+    input_dir: /mnt/hdd/lvzhihao/data/Nemotron-Post-Training-Dataset-v2/stem
+    output_dir: /mnt/hdd/lvzhihao/output/distill/Nemotron-Post-Training-Dataset-v2-stem
+    failure_log: nemotron_stem_mcq_failed.jsonl
+    file_pattern: stem-*.parquet
+    input_field: messages
+    range_start: 0
+    range_end:
+    sample_limit: 50000
+    # Auto-judged with mcq_boxed from reference assistant \\boxed{A-J}.
+
+  - task_name: ultrachat_200k
+    input_dir: /mnt/hdd/lvzhihao/data/ultrachat_200k
+    output_dir: /mnt/hdd/lvzhihao/output/distill/ultrachat_200k
+    failure_log: ultrachat_200k_failed.jsonl
+    file_pattern: data/train_*.parquet
+    judge_mode: none
+    complete_trailing_user_turn: true
+    input_field: messages
+    range_start: 0
+    range_end:
+    sample_limit: 50000
+    # Multi-turn chat distillation, no judge.

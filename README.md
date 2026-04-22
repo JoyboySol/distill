@@ -82,6 +82,23 @@
 - `OpenAI messages` 风格列表
 - 含 `content` 字段的字典
 
+如果输入字段本身是完整的多轮 `messages` 列表，并且里面已经包含
+`assistant` turn，流水线会自动切到 multi-turn 蒸馏模式：
+
+- 以整段 conversation 作为最小任务单元
+- 按 assistant turn 顺序逐轮蒸馏
+- 后续 turn 会使用前面已经蒸馏出来的 assistant 作为历史上下文
+- 最终输出仍然是一条聚合后的记录，只是 `messages` 从 `len=2` 变成 `len>2`
+- instruction-style multi-turn 数据默认不做 judge，输出里会写
+  `judge_type = none`
+
+如果 multi-turn 蒸馏中途某个 assistant turn 失败：
+
+- 会保留已经成功蒸馏的前缀
+- 停止后续 turn 生成
+- 输出记录会带上 `distill_status = partial`
+- 每个已成功 assistant turn 的 `reasoning_content` 会继续保留在对应消息里
+
 如果某条样本无法抽出有效 prompt：
 
 - 不会进入推理
@@ -110,6 +127,10 @@
 - `is_correct`
 - `judge_status`
 - `judge_detail`
+- `distill_status`
+- `distill_error`
+- `assistant_turns_completed`
+- `assistant_turns_total`
 
 其中：
 
@@ -359,6 +380,11 @@ CLI 参数会覆盖 YAML 里的同名字段，所以你可以这样临时改：
 - `file_pattern`
 - `input_field`
 - `label_field`
+- `sample_limit`
+- `judge_mode`
+- `complete_trailing_user_turn`
+- `task_schedule`
+- `round_robin_chunk_size`
 - `model`
 - `api_key`
 - `base_urls`
@@ -373,8 +399,31 @@ CLI 参数会覆盖 YAML 里的同名字段，所以你可以这样临时改：
 - `segment_flush_interval_sec`
 - `shard_size_mb`
 - `write_retries`
+- `merge_every_n_writes`
+- `upload_every_n_merges`
+- `upload_merged_shards`
+- `treat_no_judge_as_correct`
+- `hf_repo_id`
+- `hf_repo_type`
+- `hf_remote_prefix`
+- `hf_token`
 - `range_start`
 - `range_end`
+
+其中：
+
+- `sample_limit` 表示在 `range_start / range_end` 选出的文件范围内，最多只蒸馏前 N 条输入样本
+- 它是在 `rollout_count` 展开之前生效的，所以最终最多会产生 `sample_limit * rollout_count` 个 generation task
+- `judge_mode = auto | none`
+- `judge_mode = none` 时会完全跳过 judge 启发式和执行逻辑，统一落成 `judge_type = none`
+- `complete_trailing_user_turn = true` 时，如果 multi-turn 输入最后停在 `user`，流水线会再补生成一轮 assistant 收尾
+- `task_schedule = serial | round_robin`
+- `round_robin_chunk_size` 只在 `round_robin` 下生效，表示每轮每个 task 把累计 `sample_limit` 往前推进多少条
+- `merge_every_n_writes` 表示 writer 每写入 N 条结果，就尝试把当前已有 segment 增量 merge 成 parquet shard
+- `upload_merged_shards = true` 时，只会上传 `correct/shards/*.parquet`
+- `treat_no_judge_as_correct = true` 时，`judge_type = none` 的样本会被标成 `is_correct = true`、`judge_status = assumed_correct`，因此也会进入 `correct` 流
+- `upload_every_n_merges` 表示每发生 N 次 `correct` merge event，就尝试把尚未上传的 `correct shard` 增量传到 Hugging Face
+- `hf_token` 支持直接写，也支持 `${HF_TOKEN}` / `$HF_TOKEN` 这种环境变量占位
 
 `base_urls` 和 `ports` 都支持列表写法，比较适合 YAML。
 
@@ -389,6 +438,13 @@ ports:
 concurrency: 1024
 judge_concurrency: 32
 max_tokens: 12000
+task_schedule: round_robin
+round_robin_chunk_size: 5000
+merge_every_n_writes: 20000
+upload_every_n_merges: 1
+upload_merged_shards: true
+hf_repo_id: JoyboyGo/hf_data
+hf_token: ${HF_TOKEN}
 
 tasks:
   - task_name: task_a
@@ -408,8 +464,10 @@ tasks:
 - 顶层字段会作为公共配置应用到所有 task
 - 也可以显式写到 `defaults:` 里，效果一样
 - 每个 task 里同名字段会覆盖顶层公共配置
-- 如果 manifest 里有多个 task，`python -m distill --config xxx.yaml` 会按顺序依次跑完
+- 如果 manifest 里有多个 task，默认 `task_schedule = serial`，会按顺序依次跑完
+- 如果显式设成 `task_schedule = round_robin`，会按 `round_robin_chunk_size` 在多个 task 之间轮转推进，更适合让不同数据集的产出更均匀
 - 如果只想跑其中一个，用 `--task <task_name>`
+- round-robin 不会破坏原有 resume 语义，它只是分多轮把每个 task 的累计 `sample_limit` 往前推
 
 示例：
 
@@ -477,6 +535,14 @@ tasks:
   同时活跃读取的文件数。
 - `--rollout-count`
   每条输入样本独立生成多少次 rollout，默认 `1`。
+- `--judge-mode`
+  判题模式，支持 `auto` 和 `none`。
+- `--complete-trailing-user-turn`
+  multi-turn 输入若以 `user` 结尾，则额外生成一轮 assistant 收尾。
+- `--task-schedule`
+  多 task 调度方式，支持 `serial` 和 `round_robin`。
+- `--round-robin-chunk-size`
+  round-robin 时每轮给每个 task 增加多少输入样本预算。
 - `--max-tokens`
   单条 assistant 回复最多生成多少 token，默认 `7000`。
 - `--batch-size`
@@ -489,6 +555,18 @@ tasks:
   目标 shard 大小。
 - `--write-retries`
   写盘失败重试次数。
+- `--merge-every-n-writes`
+  每写入 N 条结果，周期性触发一次 segment merge。`0` 表示只在收尾时 merge。
+- `--upload-every-n-merges`
+  每发生 N 次 `correct` merge，尝试增量上传新 shard。
+- `--upload-merged-shards`
+  开启后，把新增的 `correct shard` 上传到 Hugging Face dataset repo。
+- `--hf-repo-id`
+  目标 Hugging Face dataset repo，例如 `JoyboyGo/hf_data`。
+- `--hf-remote-prefix`
+  远端一级目录名；如果不填，默认使用 `task_name`。
+- `--hf-token`
+  Hugging Face token，支持 `${HF_TOKEN}` 这种环境变量占位。
 
 ### 推荐启动命令
 
@@ -688,10 +766,92 @@ http://localhost:6765/v1
 这个脚本有几个特点：
 
 - 只会处理新出现的 `segment_*.jsonl`，重复执行不会重复统计
-- 会把增量合并状态写到 `correct/external_merge_state.json`
+- 会把增量合并状态写到 `correct/merge_state.json`
 - 会输出累计的 `token_sums`
 - 会输出累计的 `average_tokens`
 - 适合在主蒸馏任务还没结束时周期性执行
+
+如果你还想把新增的 `correct shard` 直接增量上传到 Hugging Face dataset repo，
+可以在同一个脚本里附带开启上传：
+
+```bash
+/mnt/ssd/lvzhihao/PostTrain/distill/.venv/bin/python \
+  /mnt/ssd/lvzhihao/PostTrain/distill/scripts/merge_correct_segments.py \
+  --output-dir /path/to/output \
+  --stream correct \
+  --upload-to-hf \
+  --task-name task_a \
+  --hf-repo-id JoyboyGo/hf_data
+```
+
+上传规则如下：
+
+- 只会上传 `correct/shards/shard_*.parquet`
+- 默认上传到远端一级目录 `<hf_remote_prefix>/`；如果没传这个参数，则回退到 `<task_name>/`
+- 重复执行时会根据 `output_dir/.hf_upload_state.json` 只增量上传新 shard
+- 不会把 `segments` 和 merge state 一起传上去
+
+如果你已经有一个多 task manifest，例如 `manifest/four_datasets_distill.yaml`，
+也可以直接让这个脚本按 manifest 里的每个 task 去批量 merge + upload：
+
+```bash
+/mnt/ssd/lvzhihao/PostTrain/distill/.venv/bin/python \
+  /mnt/ssd/lvzhihao/PostTrain/distill/scripts/merge_correct_segments.py \
+  --config /mnt/ssd/lvzhihao/PostTrain/distill/manifest/four_datasets_distill.yaml \
+  --stream correct
+```
+
+这时脚本会：
+
+- 遍历 manifest 里展开后的所有 task
+- 使用每个 task 自己的 `output_dir`
+- 复用 manifest 里的 `shard_size_mb`、`upload_merged_shards`、`hf_repo_id`、`hf_repo_type`、`hf_remote_prefix`、`hf_token`
+- 默认把远端目录对齐到每个 task 的 `task_name`
+
+如果你只想处理其中一个 task，可以再加：
+
+```bash
+--task nemotron_stem_mcq
+```
+
+如果本地 shard 已经重建过，但你还想忽略 `output_dir/.hf_upload_state.json`
+强制把当前 shard 重新上传一遍，可以再加：
+
+```bash
+--force-reupload
+```
+
+如果你还想忽略 `correct/merge_state.json`，并基于当前 `segments`
+把 shard 从头重建一遍，可以再加：
+
+```bash
+--force-merge
+```
+
+常见的恢复性重跑命令会是：
+
+```bash
+/mnt/ssd/lvzhihao/PostTrain/distill/.venv/bin/python \
+  /mnt/ssd/lvzhihao/PostTrain/distill/scripts/merge_correct_segments.py \
+  --config /mnt/ssd/lvzhihao/PostTrain/distill/manifest/four_datasets_distill.yaml \
+  --stream correct \
+  --force-merge \
+  --force-reupload
+```
+
+脚本每次运行后，还会默认在当前工作目录写一份
+`merge_correct_segments_summary.csv` 快照，方便你直接看每个 task 的：
+
+- segment / shard 数量
+- merged 记录条数
+- total token 统计
+- HF upload 的 uploaded / skipped / reason
+
+如果你想改路径，可以额外传：
+
+```bash
+--summary-csv-path /path/to/merge_correct_segments_summary.csv
+```
 
 如果你只想看 `correct` 数据的平均 token，而不合并 shard，也可以运行：
 

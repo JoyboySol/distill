@@ -105,10 +105,15 @@ class PipelineConfig:
     task_name: Optional[str] = None
     config_path: Optional[str] = None
     manifest_dir: Optional[str] = None
+    task_schedule: str = "serial"
+    round_robin_chunk_size: int = 1000
 
     file_pattern: str = "*.parquet"
     range_start: int = 0
     range_end: Optional[int] = None
+    sample_limit: Optional[int] = None
+    judge_mode: str = "auto"
+    complete_trailing_user_turn: bool = False
 
     input_content_field: str = "question"
     label_field: Optional[str] = None
@@ -128,6 +133,14 @@ class PipelineConfig:
     shard_target_size_mb: int = 200
     batch_size: int = 1000
     segment_target_size_mb: int = 4
+    merge_every_n_writes: int = 0
+    upload_every_n_merges: int = 1
+    upload_merged_shards: bool = False
+    treat_no_judge_as_correct: bool = False
+    hf_repo_id: Optional[str] = None
+    hf_repo_type: str = "dataset"
+    hf_remote_prefix: Optional[str] = None
+    hf_token: Optional[str] = None
 
     @property
     def primary_base_url(self) -> Optional[str]:

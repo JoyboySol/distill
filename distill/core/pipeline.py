@@ -18,14 +18,14 @@ try:
     from ..runtime.settings import PipelineConfig, logger
     from ..common.utils import ensure_message_shape, safe_json_dumps
     from .failure import FailureRecorder
-    from .judge import judge_output_with_timeout
+    from .judge import judge_output, judge_output_with_timeout
     from .llm import (AsyncLLMManager, GenerationResponse,
                       NoHealthyBackendsError)
 except ImportError:
     from runtime.settings import PipelineConfig, logger
     from common.utils import ensure_message_shape, safe_json_dumps
     from core.failure import FailureRecorder
-    from core.judge import judge_output_with_timeout
+    from core.judge import judge_output, judge_output_with_timeout
     from core.llm import (AsyncLLMManager, GenerationResponse,
                           NoHealthyBackendsError)
 
@@ -35,8 +35,10 @@ class TaskItem:
     source_file: str
     source_row: int
     rollout_index: int
-    prompt: str
     row_data: Dict[str, Any]
+    prompt: Optional[str] = None
+    input_messages: Optional[List[Dict[str, Any]]] = None
+    task_mode: str = "single_turn"
 
 
 @dataclass
@@ -53,11 +55,20 @@ class GenerationResultItem:
     messages: List[Dict[str, Any]]
     finish_reason: Optional[str]
     usage: Dict[str, Any]
+    distill_status: str = "success"
+    distill_error: Optional[str] = None
+    assistant_turns_completed: int = 1
+    assistant_turns_total: int = 1
+
+
+class InterruptFinalizeRequested(Exception):
+    pass
 
 
 class DistillPipeline:
     STREAM_ALL = "all"
     STREAM_CORRECT = "correct"
+    WRITER_POLL_INTERVAL_SEC = 0.2
     OPEN_CODE_REASONING_PYTHON_WRAPPER = (
         "Solve this problem using Python.\n"
         "Return a Python solution that can be executed directly.\n"
@@ -76,6 +87,8 @@ class DistillPipeline:
         self.judge_queue: asyncio.Queue = asyncio.Queue()
         self.result_queue: asyncio.Queue = asyncio.Queue()
         self.stop_requested = False
+        self.interrupt_finalize_requested = False
+        self.input_exhausted = False
 
         self.completed_records_loaded = False
         self.completed_records: Set[str] = set()
@@ -97,6 +110,95 @@ class DistillPipeline:
             self.STREAM_ALL: asyncio.Lock(),
             self.STREAM_CORRECT: asyncio.Lock(),
         }
+        self.last_interrupt_summary: Dict[str, Any] = {}
+
+    def _hf_upload_state_path(self) -> str:
+        return os.path.join(self.config.output_dir, ".hf_upload_state.json")
+
+    def _load_hf_upload_state(self) -> Dict[str, Any]:
+        path = self._hf_upload_state_path()
+        if not os.path.exists(path):
+            return {"uploaded_paths": []}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            uploaded_paths = data.get("uploaded_paths", [])
+            if not isinstance(uploaded_paths, list):
+                uploaded_paths = []
+            return {"uploaded_paths": uploaded_paths}
+        except Exception as e:
+            logger.warning("Failed to load HF upload state: %s", e)
+            return {"uploaded_paths": []}
+
+    def _save_hf_upload_state(self, state: Dict[str, Any]):
+        target = self._hf_upload_state_path()
+        temp = target + ".tmp"
+        with open(temp, "w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2, sort_keys=True)
+        os.replace(temp, target)
+
+    def _hf_remote_dir(self) -> str:
+        remote_dir = (self.config.hf_remote_prefix
+                      or self.config.task_name or "").strip().strip("/")
+        return remote_dir.replace("\\", "/")
+
+    def _upload_pending_correct_shards_sync(self) -> Dict[str, Any]:
+        if not self.config.upload_merged_shards:
+            return {"uploaded": 0, "skipped": 0, "reason": "disabled"}
+        if not self.config.hf_repo_id:
+            logger.warning("HF upload skipped: hf_repo_id is missing")
+            return {"uploaded": 0, "skipped": 0, "reason": "missing_repo_id"}
+        token = self.config.hf_token or os.getenv("HF_TOKEN")
+        if not token:
+            logger.warning("HF upload skipped: hf_token is missing")
+            return {"uploaded": 0, "skipped": 0, "reason": "missing_token"}
+
+        try:
+            from huggingface_hub import HfApi
+        except ImportError:
+            logger.warning("HF upload skipped: huggingface_hub is not installed")
+            return {"uploaded": 0, "skipped": 0, "reason": "missing_dependency"}
+
+        shard_dir = self._stream_dir(self.STREAM_CORRECT, "shards")
+        shard_paths = sorted(glob.glob(os.path.join(shard_dir, "shard_*.parquet")))
+        if not shard_paths:
+            return {"uploaded": 0, "skipped": 0, "reason": "no_shards"}
+
+        state = self._load_hf_upload_state()
+        uploaded_paths = set(str(path) for path in state.get("uploaded_paths", []))
+        api = HfApi(token=token)
+        api.create_repo(
+            repo_id=self.config.hf_repo_id,
+            repo_type=self.config.hf_repo_type,
+            exist_ok=True,
+        )
+
+        uploaded = 0
+        skipped = 0
+        remote_dir = self._hf_remote_dir()
+        for shard_path in shard_paths:
+            relative_path = os.path.relpath(shard_path, self.config.output_dir)
+            if relative_path in uploaded_paths:
+                skipped += 1
+                continue
+            remote_name = os.path.basename(shard_path)
+            path_in_repo = (f"{remote_dir}/{remote_name}"
+                            if remote_dir else remote_name)
+            api.upload_file(
+                path_or_fileobj=shard_path,
+                path_in_repo=path_in_repo,
+                repo_id=self.config.hf_repo_id,
+                repo_type=self.config.hf_repo_type,
+            )
+            uploaded_paths.add(relative_path)
+            state["uploaded_paths"] = sorted(uploaded_paths)
+            self._save_hf_upload_state(state)
+            uploaded += 1
+
+        return {"uploaded": uploaded, "skipped": skipped}
+
+    async def _upload_pending_correct_shards(self) -> Dict[str, Any]:
+        return await asyncio.to_thread(self._upload_pending_correct_shards_sync)
 
     @staticmethod
     def _refresh_progress_postfix(pbar: tqdm):
@@ -159,14 +261,41 @@ class DistillPipeline:
             logger.warning("Failed to estimate input row count: %s", e)
             return None
 
+    def _effective_input_row_limit(self,
+                                   estimated_rows: Optional[int]) -> Optional[int]:
+        if estimated_rows is None:
+            return None
+        if self.config.sample_limit is None:
+            return estimated_rows
+        return min(estimated_rows, max(0, int(self.config.sample_limit)))
+
     def _request_stop(self, signame: str):
         if self.stop_requested:
             return
         self.stop_requested = True
+        self.interrupt_finalize_requested = True
         logger.warning(
-            "Received %s, stopping producer and draining queued work before exit...",
+            "Received %s, cancelling in-flight work and finalizing persisted outputs...",
             signame,
         )
+
+    def _stats_summary_path(self, stream_name: str) -> str:
+        return os.path.join(self._stream_root(stream_name), "judge_stats.json")
+
+    def _write_stats_summary(self, stream_name: str) -> Dict[str, Any]:
+        try:
+            from ..tools.stats import iter_records, summarize
+        except ImportError:
+            from tools.stats import iter_records, summarize
+
+        summary = summarize(iter_records(self.config.output_dir, stream_name))
+        target = self._stats_summary_path(stream_name)
+        temp = target + ".tmp"
+        with open(temp, "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(temp, target)
+        return summary
 
     def _merge_state_path(self, stream_name: str) -> str:
         return os.path.join(self._stream_root(stream_name), "merge_state.json")
@@ -701,6 +830,93 @@ class DistillPipeline:
 
         return None
 
+    @staticmethod
+    def _normalize_message(raw_message: Any) -> Optional[Dict[str, Any]]:
+        if hasattr(raw_message, "as_py"):
+            try:
+                raw_message = raw_message.as_py()
+            except Exception:
+                pass
+        if not isinstance(raw_message, dict):
+            return None
+        role = raw_message.get("role")
+        if not isinstance(role, str) or not role.strip():
+            return None
+        normalized = ensure_message_shape(raw_message)
+        normalized["role"] = role.strip()
+        return normalized
+
+    def _normalize_multi_turn_messages(
+            self, raw_input: Any) -> Optional[List[Dict[str, Any]]]:
+        if raw_input is None:
+            return None
+
+        if isinstance(raw_input, str):
+            text = raw_input.strip()
+            if not text or text[0] not in "[{":
+                return None
+            try:
+                return self._normalize_multi_turn_messages(json.loads(text))
+            except Exception:
+                return None
+
+        if isinstance(raw_input, dict):
+            messages = raw_input.get("messages")
+            if messages is not None:
+                return self._normalize_multi_turn_messages(messages)
+            return None
+
+        if hasattr(raw_input, "tolist"):
+            try:
+                converted = raw_input.tolist()
+                if converted is not raw_input:
+                    return self._normalize_multi_turn_messages(converted)
+            except Exception:
+                pass
+
+        if isinstance(raw_input, tuple):
+            raw_input = list(raw_input)
+
+        if not isinstance(raw_input, list):
+            return None
+
+        normalized_messages = []
+        has_assistant = False
+        for message in raw_input:
+            normalized = self._normalize_message(message)
+            if normalized is None:
+                return None
+            normalized_messages.append(normalized)
+            has_assistant = has_assistant or normalized["role"] == "assistant"
+
+        if not has_assistant:
+            return None
+        return normalized_messages
+
+    def _prepare_task_input(self, raw_input: Any) -> Optional[TaskItem]:
+        input_messages = self._normalize_multi_turn_messages(raw_input)
+        if input_messages is not None:
+            return TaskItem(
+                source_file="",
+                source_row=0,
+                rollout_index=0,
+                row_data={},
+                input_messages=input_messages,
+                task_mode="multi_turn",
+            )
+
+        normalized_prompt = self._normalize_prompt(raw_input)
+        if normalized_prompt is None:
+            return None
+        return TaskItem(
+            source_file="",
+            source_row=0,
+            rollout_index=0,
+            row_data={},
+            prompt=self._format_task_prompt(normalized_prompt),
+            task_mode="single_turn",
+        )
+
     def _should_wrap_open_code_reasoning_prompt(self) -> bool:
         task_name = (self.config.task_name or "").lower()
         config_path = (self.config.config_path or "").lower()
@@ -746,12 +962,21 @@ class DistillPipeline:
                 yield pa.Table.from_pylist(batch_data)
 
     async def producer(self, input_files: List[str], pbar: tqdm):
+        self.input_exhausted = False
         self._load_completed_records(input_files)
         logger.info("Producer started. Total files to process in this node: %s",
                     len(input_files))
         if not input_files:
             logger.warning("No files assigned. Exiting producer.")
             return
+
+        row_budget = None
+        limit_reached = False
+        if self.config.sample_limit is not None:
+            row_budget = max(0, int(self.config.sample_limit))
+            if row_budget == 0:
+                logger.info("Sample limit is 0. Producer will not queue any tasks.")
+                return
 
         pending_files = list(input_files)
         active_iterators = []
@@ -802,14 +1027,21 @@ class DistillPipeline:
                     for row_data in rows:
                         if self.stop_requested:
                             break
+                        if row_budget is not None and row_budget <= 0:
+                            limit_reached = True
+                            logger.info(
+                                "Reached sample limit (%s). Producer will stop queueing new rows.",
+                                self.config.sample_limit,
+                            )
+                            break
                         source_file = os.path.abspath(file_path)
                         source_row = current_idx
+                        if row_budget is not None:
+                            row_budget -= 1
 
-                        normalized_prompt = self._normalize_prompt(
+                        prepared_task = self._prepare_task_input(
                             row_data.get(self.config.input_content_field))
-                        if normalized_prompt:
-                            task_prompt = self._format_task_prompt(
-                                normalized_prompt)
+                        if prepared_task:
                             for rollout_index in range(self.config.rollout_count):
                                 if self._is_completed(source_file, source_row,
                                                       rollout_index):
@@ -825,8 +1057,10 @@ class DistillPipeline:
                                         source_file=source_file,
                                         source_row=source_row,
                                         rollout_index=rollout_index,
-                                        prompt=task_prompt,
                                         row_data=row_data,
+                                        prompt=prepared_task.prompt,
+                                        input_messages=prepared_task.input_messages,
+                                        task_mode=prepared_task.task_mode,
                                     ))
                                 discovered = int(getattr(pbar, "_discovered_tasks",
                                                          0)) + 1
@@ -849,6 +1083,8 @@ class DistillPipeline:
 
                     global_indices_tracker[file_path] = current_idx
                     await asyncio.sleep(0)
+                    if limit_reached:
+                        break
 
                 except StopIteration:
                     logger.info("File finished reading: %s", file_path)
@@ -865,6 +1101,11 @@ class DistillPipeline:
                     active_iterators = [(f, it) for f, it in active_iterators
                                         if f != file_path]
                     global_indices_tracker.pop(file_path, None)
+            if limit_reached:
+                break
+
+        self.input_exhausted = (not limit_reached and not self.stop_requested
+                                and not pending_files and not active_iterators)
 
         logger.info("All assigned files read completely.")
 
@@ -913,21 +1154,199 @@ class DistillPipeline:
                 total += len(safe_json_dumps(message["tool_calls"]))
         return total
 
+    @staticmethod
+    def _assistant_turn_count(messages: List[Dict[str, Any]]) -> int:
+        return sum(1 for message in messages if message.get("role") == "assistant")
+
+    @staticmethod
+    def _ends_with_user(messages: List[Dict[str, Any]]) -> bool:
+        return bool(messages) and messages[-1].get("role") == "user"
+
+    @staticmethod
+    def _merge_usage_totals(current: Dict[str, Any],
+                            usage: Dict[str, Any]) -> Dict[str, Any]:
+        merged = dict(current)
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            value = usage.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                merged[key] = int(merged.get(key, 0) or 0) + int(value)
+        return merged
+
+    @staticmethod
+    def _summarize_finish_reason(finish_reasons: List[Optional[str]]
+                                 ) -> Optional[str]:
+        if any(reason == "length" for reason in finish_reasons):
+            return "length"
+        non_empty = [reason for reason in finish_reasons if reason]
+        return non_empty[-1] if non_empty else None
+
+    @staticmethod
+    def _partial_distill_error(exc: Exception) -> str:
+        if isinstance(exc, APITimeoutError):
+            return "timeout_1h"
+        if isinstance(exc, BadRequestError):
+            return f"bad_request:{exc}"
+        return f"worker_error:{type(exc).__name__}:{exc}"
+
+    async def _generate_single_turn_result(
+            self, item: TaskItem) -> GenerationResultItem:
+        if not item.prompt:
+            raise RuntimeError("empty_single_turn_prompt")
+        response = await self.llm_manager.generate(item.prompt)
+        if not response:
+            raise RuntimeError("empty_response")
+        return GenerationResultItem(
+            task=item,
+            messages=response["messages"],
+            finish_reason=response.get("finish_reason"),
+            usage=response.get("usage") or {},
+        )
+
+    async def _generate_multi_turn_result(
+            self, item: TaskItem) -> GenerationResultItem:
+        input_messages = item.input_messages or []
+        distilled_messages: List[Dict[str, Any]] = []
+        aggregated_usage: Dict[str, Any] = {}
+        finish_reasons: List[Optional[str]] = []
+        assistant_turns_total = self._assistant_turn_count(input_messages)
+        if (self.config.complete_trailing_user_turn
+                and self._ends_with_user(input_messages)):
+            assistant_turns_total += 1
+        assistant_turns_completed = 0
+        distill_status = "success"
+        distill_error = None
+
+        for message in input_messages:
+            normalized_message = ensure_message_shape(message)
+            if normalized_message.get("role") != "assistant":
+                distilled_messages.append(normalized_message)
+                continue
+
+            try:
+                response = await self.llm_manager.generate_messages(
+                    distilled_messages)
+                if not response or response.get("assistant_message") is None:
+                    raise RuntimeError("empty_response")
+            except NoHealthyBackendsError:
+                raise
+            except Exception as exc:
+                distill_status = "partial"
+                distill_error = self._partial_distill_error(exc)
+                logger.warning(
+                    "Stopping multi-turn distillation early for %s row %s after %s/%s assistant turns: %s",
+                    item.source_file,
+                    item.source_row,
+                    assistant_turns_completed,
+                    assistant_turns_total,
+                    distill_error,
+                )
+                break
+
+            distilled_messages.append(
+                ensure_message_shape(response["assistant_message"]))
+            assistant_turns_completed += 1
+            finish_reasons.append(response.get("finish_reason"))
+            aggregated_usage = self._merge_usage_totals(
+                aggregated_usage, response.get("usage") or {})
+
+        if (distill_status == "success" and self.config.complete_trailing_user_turn
+                and self._ends_with_user(distilled_messages)):
+            try:
+                response = await self.llm_manager.generate_messages(
+                    distilled_messages)
+                if not response or response.get("assistant_message") is None:
+                    raise RuntimeError("empty_response")
+            except NoHealthyBackendsError:
+                raise
+            except Exception as exc:
+                distill_status = "partial"
+                distill_error = self._partial_distill_error(exc)
+                logger.warning(
+                    "Failed to complete trailing user turn for %s row %s after %s/%s assistant turns: %s",
+                    item.source_file,
+                    item.source_row,
+                    assistant_turns_completed,
+                    assistant_turns_total,
+                    distill_error,
+                )
+            else:
+                distilled_messages.append(
+                    ensure_message_shape(response["assistant_message"]))
+                assistant_turns_completed += 1
+                finish_reasons.append(response.get("finish_reason"))
+                aggregated_usage = self._merge_usage_totals(
+                    aggregated_usage, response.get("usage") or {})
+
+        return GenerationResultItem(
+            task=item,
+            messages=distilled_messages,
+            finish_reason=self._summarize_finish_reason(finish_reasons),
+            usage=aggregated_usage,
+            distill_status=distill_status,
+            distill_error=distill_error,
+            assistant_turns_completed=assistant_turns_completed,
+            assistant_turns_total=assistant_turns_total,
+        )
+
+    async def _generate_task_result(self, item: TaskItem) -> GenerationResultItem:
+        if item.task_mode == "multi_turn":
+            return await self._generate_multi_turn_result(item)
+        return await self._generate_single_turn_result(item)
+
     def _build_output_record(
-        self,
-        task: TaskItem,
-        messages: List[Dict[str, Any]],
+            self,
+            task: TaskItem,
+            messages: List[Dict[str, Any]],
         finish_reason: Optional[str],
         usage: Dict[str, Any],
+        distill_status: str = "success",
+        distill_error: Optional[str] = None,
+        assistant_turns_completed: int = 1,
+        assistant_turns_total: int = 1,
     ) -> Dict[str, Any]:
         messages = [ensure_message_shape(message) for message in messages]
         dataset_name = self._dataset_name(task.row_data, task.source_file)
-        judge_result = judge_output_with_timeout(
-            task.row_data,
-            messages,
-            label_field=self.config.label_field,
-            timeout=self.config.judge_timeout_sec,
-        )
+        judge_mode = str(getattr(self.config, "judge_mode", "auto")
+                         or "auto").lower()
+        if judge_mode == "none":
+            judge_result = {
+                "judge_type": None,
+                "judge_backend": None,
+                "is_correct": None,
+                "judge_status": "not_applicable",
+                "judge_detail": {},
+            }
+        elif task.task_mode == "multi_turn":
+            judge_result = judge_output(
+                task.row_data,
+                messages,
+                label_field=self.config.label_field,
+            )
+        else:
+            judge_result = judge_output_with_timeout(
+                task.row_data,
+                messages,
+                label_field=self.config.label_field,
+                timeout=self.config.judge_timeout_sec,
+            )
+        if judge_result.get("judge_type") is None:
+            assume_no_judge_correct = (
+                self.config.treat_no_judge_as_correct
+                and finish_reason != "length")
+            judge_result = {
+                "judge_type": "none",
+                "judge_backend": "none",
+                "is_correct": True if assume_no_judge_correct else None,
+                "judge_status": (
+                    "assumed_correct"
+                    if assume_no_judge_correct else
+                    "not_applicable_overlong"
+                    if (self.config.treat_no_judge_as_correct
+                        and finish_reason == "length") else "not_applicable"),
+                "judge_detail": {
+                    "assumed_correct": True
+                } if assume_no_judge_correct else {},
+            }
 
         return {
             "dataset_name": dataset_name,
@@ -956,6 +1375,10 @@ class DistillPipeline:
             "prompt_tokens": usage.get("prompt_tokens"),
             "completion_tokens": usage.get("completion_tokens"),
             "total_tokens": usage.get("total_tokens"),
+            "distill_status": distill_status,
+            "distill_error": distill_error,
+            "assistant_turns_completed": assistant_turns_completed,
+            "assistant_turns_total": assistant_turns_total,
             "source_file": task.source_file,
             "source_row": task.source_row,
             "rollout_index": task.rollout_index,
@@ -974,16 +1397,8 @@ class DistillPipeline:
                 break
 
             try:
-                response = await self.llm_manager.generate(item.prompt)
-                if not response:
-                    raise RuntimeError("empty_response")
-                await self.judge_queue.put(
-                    GenerationResultItem(
-                        task=item,
-                        messages=response["messages"],
-                        finish_reason=response.get("finish_reason"),
-                        usage=response.get("usage") or {},
-                    ))
+                result = await self._generate_task_result(item)
+                await self.judge_queue.put(result)
 
             except NoHealthyBackendsError as e:
                 logger.error(
@@ -1059,6 +1474,10 @@ class DistillPipeline:
                     item.messages,
                     item.finish_reason,
                     item.usage,
+                    item.distill_status,
+                    item.distill_error,
+                    item.assistant_turns_completed,
+                    item.assistant_turns_total,
                 )
                 await self.result_queue.put(
                     ResultItem(
@@ -1173,7 +1592,7 @@ class DistillPipeline:
     async def _flush_with_retry(self, records: List[Dict[str, Any]],
                                 stream_name: str):
         if not records:
-            return
+            return None
 
         shard_idx = await self._next_index(stream_name, "shard")
         last_error = None
@@ -1183,7 +1602,7 @@ class DistillPipeline:
                 self._save_resume_state()
                 logger.info("Flushed %s shard_%05d.parquet with %s rows",
                             stream_name, shard_idx, len(records))
-                return
+                return shard_idx
             except Exception as e:
                 last_error = e
                 logger.error(
@@ -1215,7 +1634,10 @@ class DistillPipeline:
         segment_paths = sorted(
             glob.glob(os.path.join(segment_dir, "segment_*.jsonl")))
         if not segment_paths:
-            return
+            return {
+                "merged_segments_this_run": 0,
+                "shards_written_this_run": 0,
+            }
 
         state = self._load_merge_state(stream_name)
         merged_segments = set(state.get("merged_segments", []))
@@ -1224,21 +1646,30 @@ class DistillPipeline:
             not in merged_segments
         ]
         if not pending_segments:
-            return
+            return {
+                "merged_segments_this_run": 0,
+                "shards_written_this_run": 0,
+            }
 
         shard_target_bytes = self.config.shard_target_size_mb * 1024 * 1024
         records_buffer: List[Dict[str, Any]] = []
         records_size = 0
         current_segment_names: List[str] = []
+        merged_segments_this_run = 0
+        shards_written_this_run = 0
 
         async def flush_pending():
             nonlocal records_buffer, records_size, current_segment_names
+            nonlocal merged_segments_this_run, shards_written_this_run
             if not records_buffer:
                 return
-            await self._flush_with_retry(records_buffer, stream_name)
+            shard_idx = await self._flush_with_retry(records_buffer, stream_name)
             merged_segments.update(current_segment_names)
             state["merged_segments"] = sorted(merged_segments)
             self._save_merge_state(stream_name, state)
+            merged_segments_this_run += len(current_segment_names)
+            if shard_idx is not None:
+                shards_written_this_run += 1
             records_buffer = []
             records_size = 0
             current_segment_names = []
@@ -1263,6 +1694,56 @@ class DistillPipeline:
             current_segment_names.append(segment_name)
 
         await flush_pending()
+        return {
+            "merged_segments_this_run": merged_segments_this_run,
+            "shards_written_this_run": shards_written_this_run,
+        }
+
+    async def _run_merge_cycle(self, buffers: Dict[str, List[Dict[str, Any]]],
+                               buffer_sizes: Dict[str, int]) -> Dict[str, Any]:
+        await self._flush_segment_buffer(buffers, buffer_sizes, self.STREAM_ALL)
+        await self._flush_segment_buffer(buffers, buffer_sizes,
+                                         self.STREAM_CORRECT)
+        all_summary = await self._merge_stream_segments(self.STREAM_ALL)
+        correct_summary = await self._merge_stream_segments(self.STREAM_CORRECT)
+        return {
+            "all": all_summary,
+            "correct": correct_summary,
+        }
+
+    async def _finalize_interrupt_outputs(
+            self,
+            buffers: Dict[str, List[Dict[str, Any]]],
+            buffer_sizes: Dict[str, int]) -> Dict[str, Any]:
+        merge_summary = await self._run_merge_cycle(buffers, buffer_sizes)
+        upload_summary: Dict[str, Any] = {
+            "uploaded": 0,
+            "skipped": 0,
+            "reason": "disabled",
+        }
+        if self.config.upload_merged_shards:
+            try:
+                upload_summary = await self._upload_pending_correct_shards()
+            except Exception as e:
+                logger.error("Failed to upload correct shards during interrupt finalization: %s",
+                             e)
+                upload_summary = {
+                    "uploaded": 0,
+                    "skipped": 0,
+                    "reason": f"error:{type(e).__name__}",
+                }
+
+        stats_summary = {
+            self.STREAM_ALL: self._write_stats_summary(self.STREAM_ALL),
+            self.STREAM_CORRECT: self._write_stats_summary(self.STREAM_CORRECT),
+        }
+        summary = {
+            "merge": merge_summary,
+            "upload": upload_summary,
+            "stats": stats_summary,
+        }
+        self.last_interrupt_summary = summary
+        return summary
 
     async def writer_daemon(self, pbar: tqdm):
         buffers = {
@@ -1275,15 +1756,22 @@ class DistillPipeline:
         }
         segment_target_bytes = self._segment_target_bytes()
         flush_interval = max(0.0, self.config.segment_flush_interval_sec)
+        writes_since_merge = 0
+        merges_since_upload = 0
 
         while True:
+            if self.interrupt_finalize_requested:
+                await self._finalize_interrupt_outputs(buffers, buffer_sizes)
+                break
             try:
-                if flush_interval > 0:
-                    item = await asyncio.wait_for(self.result_queue.get(),
-                                                  timeout=flush_interval)
-                else:
-                    item = await self.result_queue.get()
+                poll_timeout = (flush_interval if flush_interval > 0 else
+                                self.WRITER_POLL_INTERVAL_SEC)
+                item = await asyncio.wait_for(self.result_queue.get(),
+                                              timeout=poll_timeout)
             except asyncio.TimeoutError:
+                if self.interrupt_finalize_requested:
+                    await self._finalize_interrupt_outputs(buffers, buffer_sizes)
+                    break
                 await self._flush_segment_buffer(buffers, buffer_sizes,
                                                  self.STREAM_ALL)
                 await self._flush_segment_buffer(buffers, buffer_sizes,
@@ -1292,12 +1780,13 @@ class DistillPipeline:
 
             if item is None:
                 try:
-                    await self._flush_segment_buffer(buffers, buffer_sizes,
-                                                     self.STREAM_ALL)
-                    await self._flush_segment_buffer(buffers, buffer_sizes,
-                                                     self.STREAM_CORRECT)
-                    await self._merge_stream_segments(self.STREAM_ALL)
-                    await self._merge_stream_segments(self.STREAM_CORRECT)
+                    await self._run_merge_cycle(buffers, buffer_sizes)
+                    if self.config.upload_merged_shards:
+                        try:
+                            await self._upload_pending_correct_shards()
+                        except Exception as e:
+                            logger.error("Failed to upload correct shards: %s",
+                                         e)
                 finally:
                     self.result_queue.task_done()
                 break
@@ -1317,12 +1806,30 @@ class DistillPipeline:
 
             try:
                 self._refresh_progress_postfix(pbar)
+                writes_since_merge += 1
                 if buffer_sizes[self.STREAM_ALL] >= segment_target_bytes:
                     await self._flush_segment_buffer(buffers, buffer_sizes,
                                                      self.STREAM_ALL)
                 if buffer_sizes[self.STREAM_CORRECT] >= segment_target_bytes:
                     await self._flush_segment_buffer(buffers, buffer_sizes,
                                                      self.STREAM_CORRECT)
+                if (self.config.merge_every_n_writes > 0
+                        and writes_since_merge >= self.config.merge_every_n_writes):
+                    periodic_summary = await self._run_merge_cycle(buffers,
+                                                                   buffer_sizes)
+                    writes_since_merge = 0
+                    if periodic_summary["correct"].get(
+                            "merged_segments_this_run", 0) > 0:
+                        merges_since_upload += 1
+                    if (self.config.upload_merged_shards
+                            and merges_since_upload >= max(
+                                1, int(self.config.upload_every_n_merges or 1))):
+                        try:
+                            await self._upload_pending_correct_shards()
+                        except Exception as e:
+                            logger.error("Failed to upload correct shards: %s",
+                                         e)
+                        merges_since_upload = 0
             finally:
                 self.result_queue.task_done()
 
@@ -1345,9 +1852,15 @@ class DistillPipeline:
         for file_path in input_files:
             print(f"   - {os.path.basename(file_path)}")
         estimated_rows = self._estimate_input_rows(input_files)
-        if estimated_rows is not None:
-            estimated_tasks = estimated_rows * self.config.rollout_count
-            print(f"Estimated input rows : {estimated_rows}")
+        effective_rows = self._effective_input_row_limit(estimated_rows)
+        if effective_rows is not None:
+            estimated_tasks = effective_rows * self.config.rollout_count
+            if self.config.sample_limit is not None and estimated_rows is not None:
+                print(
+                    f"Estimated input rows : {effective_rows} (capped from {estimated_rows} by sample_limit)"
+                )
+            else:
+                print(f"Estimated input rows : {effective_rows}")
             print(f"Estimated max tasks  : {estimated_tasks}")
         print("=" * 50)
 
@@ -1366,8 +1879,10 @@ class DistillPipeline:
 
         estimated_rows = self._estimate_input_rows(input_files)
         estimated_tasks = None
-        if estimated_rows is not None:
-            estimated_tasks = estimated_rows * self.config.rollout_count
+        effective_rows = self._effective_input_row_limit(estimated_rows)
+        if effective_rows is not None:
+            estimated_tasks = effective_rows * self.config.rollout_count
+        start_progress = dict(self.resume_progress)
 
         pbar = tqdm(
             total=estimated_tasks,
@@ -1392,33 +1907,57 @@ class DistillPipeline:
             asyncio.create_task(self.judge_worker(i))
             for i in range(self.config.judge_concurrency)
         ]
+        interrupted = False
 
         try:
             producer_and_generation_tasks = {
                 producer_task,
                 *generation_workers,
             }
-            while True:
+            while not producer_task.done():
+                if self.interrupt_finalize_requested:
+                    raise InterruptFinalizeRequested()
                 done, _ = await asyncio.wait(
                     producer_and_generation_tasks,
-                    return_when=asyncio.FIRST_EXCEPTION,
+                    timeout=self.WRITER_POLL_INTERVAL_SEC,
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
+                if self.interrupt_finalize_requested:
+                    raise InterruptFinalizeRequested()
+                if not done:
+                    continue
                 task_error = next(
                     (task.exception() for task in done if task.exception() is not None),
                     None,
                 )
                 if task_error is not None:
                     raise task_error
-                if producer_task in done:
-                    break
+            if producer_task.exception() is not None:
+                raise producer_task.exception()
+            if self.interrupt_finalize_requested:
+                raise InterruptFinalizeRequested()
             for _ in generation_workers:
                 await self.task_queue.put(None)
             await self._wait_tasks(generation_workers, "generation")
             pbar.close()
+            if self.interrupt_finalize_requested:
+                raise InterruptFinalizeRequested()
             for _ in judge_workers:
                 await self.judge_queue.put(None)
             await self._wait_tasks(judge_workers, "judge")
+            if self.interrupt_finalize_requested:
+                raise InterruptFinalizeRequested()
             await self.result_queue.put(None)
+            await self._wait_task(writer_task, "writer")
+        except InterruptFinalizeRequested:
+            interrupted = True
+            tasks_to_cancel = []
+            for task in [producer_task, *generation_workers, *judge_workers]:
+                if not task.done():
+                    task.cancel()
+                    tasks_to_cancel.append(task)
+            if tasks_to_cancel:
+                await asyncio.gather(*tasks_to_cancel, return_exceptions=True)
             await self._wait_task(writer_task, "writer")
         except Exception:
             self.stop_requested = True
@@ -1441,6 +1980,16 @@ class DistillPipeline:
                 pbar.close()
 
         logger.info("Pipeline Complete.")
+        return {
+            "written_delta": int(self.resume_progress["written"]) - int(
+                start_progress["written"]),
+            "correct_delta": int(self.resume_progress["correct"]) - int(
+                start_progress["correct"]),
+            "overlong_delta": int(self.resume_progress["overlong"]) - int(
+                start_progress["overlong"]),
+            "input_exhausted": bool(self.input_exhausted),
+            "interrupted": interrupted,
+        }
 
 
 RoundRobinPipeline = DistillPipeline
