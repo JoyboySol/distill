@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import os
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -34,6 +35,9 @@ DEFAULT_PIPELINE_VALUES: Dict[str, Any] = {
     "file_pattern": "*.parquet",
     "range_start": 0,
     "range_end": None,
+    "sample_limit": None,
+    "judge_mode": "auto",
+    "complete_trailing_user_turn": False,
     "model": "Qwen3-30B-A3B-Thinking-2507",
     "api_key": os.getenv("OPENAI_API_KEY", "EMPTY"),
     "vllm_ls_command": DEFAULT_VLLM_LS_COMMAND,
@@ -44,6 +48,8 @@ DEFAULT_PIPELINE_VALUES: Dict[str, Any] = {
     "judge_timeout_sec": 20.0,
     "active_files": 6,
     "rollout_count": 1,
+    "task_schedule": "serial",
+    "round_robin_chunk_size": 1000,
     "input_field": "question",
     "label_field": None,
     "llm_timeout": DEFAULT_LLM_TIMEOUT,
@@ -53,6 +59,14 @@ DEFAULT_PIPELINE_VALUES: Dict[str, Any] = {
     "segment_flush_interval_sec": 0.0,
     "batch_size": 1000,
     "write_retries": 3,
+    "merge_every_n_writes": 0,
+    "upload_every_n_merges": 1,
+    "upload_merged_shards": False,
+    "treat_no_judge_as_correct": False,
+    "hf_repo_id": None,
+    "hf_repo_type": "dataset",
+    "hf_remote_prefix": None,
+    "hf_token": None,
 }
 
 CONFIG_KEY_ALIASES = {
@@ -62,11 +76,16 @@ CONFIG_KEY_ALIASES = {
     "file-pattern": "file_pattern",
     "range-start": "range_start",
     "range-end": "range_end",
+    "sample-limit": "sample_limit",
+    "judge-mode": "judge_mode",
+    "complete-trailing-user-turn": "complete_trailing_user_turn",
     "api-key": "api_key",
     "judge-concurrency": "judge_concurrency",
     "judge-timeout-sec": "judge_timeout_sec",
     "active-files": "active_files",
     "rollout-count": "rollout_count",
+    "task-schedule": "task_schedule",
+    "round-robin-chunk-size": "round_robin_chunk_size",
     "llm-timeout": "llm_timeout",
     "max-tokens": "max_tokens",
     "shard-size-mb": "shard_size_mb",
@@ -74,6 +93,14 @@ CONFIG_KEY_ALIASES = {
     "segment-flush-interval-sec": "segment_flush_interval_sec",
     "batch-size": "batch_size",
     "write-retries": "write_retries",
+    "merge-every-n-writes": "merge_every_n_writes",
+    "upload-every-n-merges": "upload_every_n_merges",
+    "upload-merged-shards": "upload_merged_shards",
+    "treat-no-judge-as-correct": "treat_no_judge_as_correct",
+    "hf-repo-id": "hf_repo_id",
+    "hf-repo-type": "hf_repo_type",
+    "hf-remote-prefix": "hf_remote_prefix",
+    "hf-token": "hf_token",
 }
 
 
@@ -88,6 +115,21 @@ def _normalize_config_keys(mapping: Dict[str, Any]) -> Dict[str, Any]:
 def _add_argument(parser: argparse.ArgumentParser, *names: str, **kwargs):
     kwargs.setdefault("default", argparse.SUPPRESS)
     parser.add_argument(*names, **kwargs)
+
+
+def _resolve_optional_env_text(raw: Any) -> Any:
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        return raw
+    text = raw.strip()
+    if not text:
+        return None
+    if text.startswith("${") and text.endswith("}") and len(text) > 3:
+        return os.getenv(text[2:-1], "")
+    if text.startswith("$") and len(text) > 1:
+        return os.getenv(text[1:], "")
+    return raw
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -163,6 +205,26 @@ def build_parser() -> argparse.ArgumentParser:
                   "--range-end",
                   type=int,
                   help="End index of file list (exclusive)")
+    _add_argument(
+        parser,
+        "--sample-limit",
+        type=int,
+        help=("Maximum number of input samples to distill after file range "
+              "selection. Applied before rollout expansion."),
+    )
+    _add_argument(
+        parser,
+        "--judge-mode",
+        type=str,
+        help="Judge mode: auto or none.",
+    )
+    _add_argument(
+        parser,
+        "--complete-trailing-user-turn",
+        action="store_true",
+        help=("For multi-turn inputs ending in a user turn, generate one extra "
+              "assistant reply to complete the conversation."),
+    )
 
     _add_argument(parser, "--model", type=str)
     _add_argument(
@@ -207,6 +269,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_argument(
         parser,
+        "--task-schedule",
+        type=str,
+        help="Task scheduling mode across manifest tasks: serial or round_robin.",
+    )
+    _add_argument(
+        parser,
+        "--round-robin-chunk-size",
+        type=int,
+        help="Per-task sample_limit increment for each round-robin pass.",
+    )
+    _add_argument(
+        parser,
         "--llm-timeout",
         type=float,
         help="Per-request timeout in seconds for chat completions.",
@@ -235,6 +309,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_argument(parser, "--batch-size", type=int)
     _add_argument(parser, "--write-retries", type=int)
+    _add_argument(
+        parser,
+        "--merge-every-n-writes",
+        type=int,
+        help="Trigger a periodic segment merge every N written records. 0 disables it.",
+    )
+    _add_argument(
+        parser,
+        "--upload-every-n-merges",
+        type=int,
+        help="Upload newly merged correct shards every N merge events.",
+    )
+    _add_argument(
+        parser,
+        "--upload-merged-shards",
+        action="store_true",
+        help="Upload merged correct shards to a Hugging Face dataset repo.",
+    )
+    _add_argument(
+        parser,
+        "--treat-no-judge-as-correct",
+        action="store_true",
+        help=("Treat judge_type=none samples as assumed-correct so they also "
+              "enter the correct stream."),
+    )
+    _add_argument(parser, "--hf-repo-id", type=str)
+    _add_argument(parser, "--hf-repo-type", type=str)
+    _add_argument(parser, "--hf-remote-prefix", type=str)
+    _add_argument(parser, "--hf-token", type=str)
     return parser
 
 
@@ -306,6 +409,9 @@ def _build_config_from_values(values: Dict[str, Any]) -> PipelineConfig:
         task_name=values.get("task_name"),
         config_path=values.get("config_path"),
         manifest_dir=values.get("manifest_dir"),
+        task_schedule=str(values.get("task_schedule", "serial") or "serial"),
+        round_robin_chunk_size=int(values.get("round_robin_chunk_size", 1000)
+                                   or 1000),
         max_concurrency=values["concurrency"],
         judge_concurrency=values["judge_concurrency"],
         judge_timeout_sec=values["judge_timeout_sec"],
@@ -316,6 +422,10 @@ def _build_config_from_values(values: Dict[str, Any]) -> PipelineConfig:
         file_pattern=values["file_pattern"],
         range_start=values["range_start"],
         range_end=values["range_end"],
+        sample_limit=values["sample_limit"],
+        judge_mode=str(values.get("judge_mode", "auto") or "auto"),
+        complete_trailing_user_turn=bool(values.get(
+            "complete_trailing_user_turn", False)),
         input_content_field=values["input_field"],
         label_field=values["label_field"],
         shard_target_size_mb=values["shard_size_mb"],
@@ -323,6 +433,16 @@ def _build_config_from_values(values: Dict[str, Any]) -> PipelineConfig:
         segment_flush_interval_sec=values["segment_flush_interval_sec"],
         batch_size=values["batch_size"],
         write_retries=values["write_retries"],
+        merge_every_n_writes=int(values.get("merge_every_n_writes", 0) or 0),
+        upload_every_n_merges=int(values.get("upload_every_n_merges", 1)
+                                  or 1),
+        upload_merged_shards=bool(values.get("upload_merged_shards", False)),
+        treat_no_judge_as_correct=bool(values.get(
+            "treat_no_judge_as_correct", False)),
+        hf_repo_id=values.get("hf_repo_id"),
+        hf_repo_type=str(values.get("hf_repo_type", "dataset") or "dataset"),
+        hf_remote_prefix=values.get("hf_remote_prefix"),
+        hf_token=_resolve_optional_env_text(values.get("hf_token")),
     )
 
 
@@ -360,6 +480,80 @@ def _print_available_configs(manifest_dir: Path):
         print(f"{rel_path}  [tasks: {task_names}]")
 
 
+async def _run_pipeline_once(config: PipelineConfig, pipeline_cls):
+    pipeline = pipeline_cls(config)
+    summary = await pipeline.run()
+    return summary or {}
+
+
+def _run_round_robin_configs(configs: List[PipelineConfig], pipeline_cls):
+    if not configs:
+        return
+    chunk_size = int(configs[0].round_robin_chunk_size or 0)
+    if chunk_size <= 0:
+        raise ValueError("round_robin_chunk_size must be > 0")
+
+    task_states = [{
+        "base_config": config,
+        "current_limit": 0,
+        "done": False,
+    } for config in configs]
+    round_index = 0
+
+    while any(not state["done"] for state in task_states):
+        round_index += 1
+        logger.info("Starting round-robin pass %s", round_index)
+        for state in task_states:
+            if state["done"]:
+                continue
+
+            base_config = state["base_config"]
+            total_limit = base_config.sample_limit
+            next_limit = state["current_limit"] + chunk_size
+            if total_limit is not None:
+                next_limit = min(next_limit, int(total_limit))
+                if next_limit <= state["current_limit"]:
+                    state["done"] = True
+                    continue
+
+            run_config = replace(base_config, sample_limit=next_limit)
+            logger.info("Round-robin task %s -> sample_limit=%s",
+                        base_config.task_name or "<unnamed>", next_limit)
+            summary = asyncio.run(_run_pipeline_once(run_config, pipeline_cls))
+            state["current_limit"] = next_limit
+
+            if total_limit is not None and next_limit >= int(total_limit):
+                state["done"] = True
+                continue
+            if summary.get("input_exhausted"):
+                state["done"] = True
+
+
+def run_resolved_configs(configs: List[PipelineConfig], pipeline_cls=None):
+    if pipeline_cls is None:
+        try:
+            from .core.pipeline import DistillPipeline
+        except ImportError:
+            from core.pipeline import DistillPipeline
+        pipeline_cls = DistillPipeline
+
+    schedule = str(configs[0].task_schedule or "serial").lower() if configs else "serial"
+    if configs and schedule == "round_robin":
+        _run_round_robin_configs(configs, pipeline_cls)
+        return
+
+    for index, config in enumerate(configs, 1):
+        logger.info("Starting task %s/%s", index, len(configs))
+        if config.config_path:
+            logger.info("Loaded task config: %s", config.config_path)
+        if config.task_name:
+            logger.info("Task name: %s", config.task_name)
+        logger.info("Failure log path: %s", config.failure_log)
+        logger.info("Resolved %s backend(s): %s", len(config.base_urls),
+                    ", ".join(config.base_urls))
+        asyncio.run(_run_pipeline_once(config, pipeline_cls))
+
+
 def main():
     parser = build_parser()
     args = parser.parse_args()
@@ -371,23 +565,9 @@ def main():
         _print_available_configs(manifest_dir)
         return
     configs = build_configs(args)
-    try:
-        from .core.pipeline import DistillPipeline
-    except ImportError:
-        from core.pipeline import DistillPipeline
     logger.info("Resolved %s task(s) for this run", len(configs))
     try:
-        for index, config in enumerate(configs, 1):
-            logger.info("Starting task %s/%s", index, len(configs))
-            if config.config_path:
-                logger.info("Loaded task config: %s", config.config_path)
-            if config.task_name:
-                logger.info("Task name: %s", config.task_name)
-            logger.info("Failure log path: %s", config.failure_log)
-            logger.info("Resolved %s backend(s): %s", len(config.base_urls),
-                        ", ".join(config.base_urls))
-            pipeline = DistillPipeline(config)
-            asyncio.run(pipeline.run())
+        run_resolved_configs(configs)
     except KeyboardInterrupt:
         print("\nStopped by user.")
 

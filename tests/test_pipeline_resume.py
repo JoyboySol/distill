@@ -94,6 +94,56 @@ class ResumeIndexTests(unittest.TestCase):
 
             self.assertEqual(formatted, "Original problem body")
 
+    def test_producer_respects_sample_limit(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            input_dir = Path(tmpdir) / "inputs"
+            input_dir.mkdir(parents=True, exist_ok=True)
+            input_path = input_dir / "samples.jsonl"
+            input_path.write_text(
+                "\n".join([
+                    json.dumps({"question": "q1"}),
+                    json.dumps({"question": "q2"}),
+                    json.dumps({"question": "q3"}),
+                ]) + "\n",
+                encoding="utf-8",
+            )
+
+            config = PipelineConfig(
+                input_dir=str(input_dir),
+                output_dir=str(Path(tmpdir) / "out"),
+                failure_log=str(Path(tmpdir) / "failures.jsonl"),
+                model_name="test-model",
+                api_key="EMPTY",
+                base_urls=["http://127.0.0.1:20001/v1"],
+                max_concurrency=1,
+                batch_size=2,
+                sample_limit=2,
+            )
+            pipeline = DistillPipeline(config)
+
+            class _Pbar:
+
+                def __init__(self):
+                    self._resumed_tasks = 0
+                    self._discovered_tasks = 0
+                    self._written_tasks = 0
+                    self._correct_tasks = 0
+                    self._overlong_tasks = 0
+                    self.postfix = ""
+
+                def set_postfix_str(self, text):
+                    self.postfix = text
+
+            import asyncio
+
+            asyncio.run(pipeline.producer([str(input_path)], _Pbar()))
+
+            queued = []
+            while not pipeline.task_queue.empty():
+                queued.append(pipeline.task_queue.get_nowait())
+
+            self.assertEqual([item.prompt for item in queued], ["q1", "q2"])
+
 
 if __name__ == "__main__":
     unittest.main()
