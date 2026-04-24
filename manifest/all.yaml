@@ -1,0 +1,158 @@
+model: Nanbeige4.1-3B
+ports:
+  - 6758-6765
+
+concurrency: 2048
+judge_concurrency: 16
+active_files: 32
+rollout_count: 4
+max_tokens: 16000
+batch_size: 1000
+
+segment_size_mb: 1
+segment_flush_interval_sec: 10
+shard_size_mb: 200
+write_retries: 3
+
+task_schedule: round_robin
+round_robin_chunk_size: 1250
+
+merge_every_n_writes:
+upload_every_n_merges:
+upload_merged_shards: true
+treat_no_judge_as_correct: true
+hf_repo_id: JoyboyGo/hf_data
+hf_repo_type: dataset
+hf_remote_prefix:
+hf_token:
+
+tasks:
+  - task_name: math_lighteval
+    input_dir: /mnt/hdd/lvzhihao/data/MATH-lighteval
+    output_dir: /mnt/hdd/lvzhihao/output/distill/MATH-lighteval
+    failure_log: math_lighteval_failed.jsonl
+    file_pattern: "*/train-*.parquet"
+    input_field: problem
+    # MATH-lighteval 的 gold answer 在 `solution` 里，最终答案包在 `\\boxed{}` 中。
+    # 交给 math_verify 时会直接从 solution 里做 boxed 抽取。
+    label_field: solution
+    rollout_count: 4
+    field: math
+
+  - task_name: openr1_math_220k
+    input_dir: /mnt/hdd/lvzhihao/data/OpenR1-Math-220k
+    output_dir: /mnt/hdd/lvzhihao/output/distill/OpenR1-Math-220k
+    failure_log: openr1_math_220k_failed.jsonl
+    file_pattern: "all/*.parquet"
+    input_field: problem
+    # 直接走 math_verify。
+    label_field: answer
+    rollout_count: 4
+    field: math
+
+  - task_name: math_sft_40k
+    input_dir: /mnt/hdd/lvzhihao/data/math_sft_40K
+    output_dir: /mnt/hdd/lvzhihao/output/distill/math_sft_40K
+    failure_log: math_sft_40k_failed.jsonl
+    file_pattern: train.jsonl
+    input_field: question
+    # 直接走 math_verify。
+    label_field: golden_answer
+    rollout_count: 4
+    field: math
+
+  - task_name: python_code_dataset_500k
+    input_dir: /mnt/hdd/lvzhihao/data/python-code-dataset-500k
+    output_dir: /mnt/hdd/lvzhihao/output/distill/python-code-dataset-500k
+    failure_log: python_code_dataset_500k_failed.jsonl
+    file_pattern: data/*.parquet
+    judge_mode: none
+    input_field: instruction
+    range_start: 0
+    range_end:
+    sample_limit: 40000
+    rollout_count: 2
+    # Pure instruction/code data, no judge.
+    field: code
+
+
+  - task_name: codex_7m_non_thinking
+    input_dir: /mnt/hdd/lvzhihao/data/CodeX-7M-Non-Thinking
+    output_dir: /mnt/hdd/lvzhihao/output/distill/CodeX-7M-Non-Thinking
+    failure_log: codex_7m_non_thinking_failed.jsonl
+    file_pattern: data/*.parquet
+    judge_mode: none
+    input_field: input
+    range_start: 0
+    range_end:
+    sample_limit: 10000
+    rollout_count: 2
+    # Pure instruction/code data, no judge.
+    field: code
+
+  - task_name: nemotron_stem_mcq
+    input_dir: /mnt/hdd/lvzhihao/data/Nemotron-Post-Training-Dataset-v2/stem
+    output_dir: /mnt/hdd/lvzhihao/output/distill/Nemotron-Post-Training-Dataset-v2-stem
+    failure_log: nemotron_stem_mcq_failed.jsonl
+    file_pattern: stem-*.parquet
+    input_field: messages
+    range_start: 0
+    range_end:
+    sample_limit: 50000
+    # Auto-judged with mcq_boxed from reference assistant \\boxed{A-J}.
+    field: stem
+    
+  - task_name: open_math_instruct2
+
+    input_dir: /mnt/hdd/lvzhihao/data/OpenMathInstruct-2/data
+    output_dir: /mnt/hdd/lvzhihao/output/OpenMathInstruct-2
+    failure_log: open_math_failed.jsonl
+    file_pattern: train-*.parquet
+    input_field: problem
+    label_field: expected_answer
+    range_start: 0
+    range_end:
+    field: math
+
+  - task_name: openthoughts3_math_nanbeige4_1_3b
+    input_dir: /mnt/hdd/lvzhihao/data/OpenThoughts3-1.2M/data
+    output_dir: /mnt/hdd/lvzhihao/output/OpenThoughts3-1.2M-math-distill-nanbeige4_1_3b
+    failure_log: openthoughts3_math_nanbeige4_1_3b_failed.jsonl
+    file_pattern: all_data_with_questions_math_unique_queries_high_confidence.parquet
+    input_field: question
+    label_field: label
+    range_start: 0
+    range_end: 1
+    field: math
+
+  - task_name: opencode_reasoning_split_0
+    input_dir: /mnt/hdd/lvzhihao/data/OpenCodeReasoning_with_tests/split_0
+    output_dir: /mnt/hdd/lvzhihao/output/OpenCodeReasoning-distill/split_0
+    failure_log: opencode_reasoning_split_0_failed.jsonl
+    file_pattern: "*.parquet"
+    input_field: input
+    label_field:
+    concurrency: 160
+    judge_concurrency: 16
+    active_files: 2
+    rollout_count: 4
+    max_tokens: 62000
+    batch_size: 1000
+    segment_size_mb: 2
+    segment_flush_interval_sec: 10
+    shard_size_mb: 200
+    write_retries: 3
+    field: code
+
+  - task_name: ultrachat_200k
+    input_dir: /mnt/hdd/lvzhihao/data/ultrachat_200k
+    output_dir: /mnt/hdd/lvzhihao/output/distill/ultrachat_200k
+    failure_log: ultrachat_200k_failed.jsonl
+    file_pattern: data/train_*.parquet
+    judge_mode: none
+    complete_trailing_user_turn: true
+    input_field: messages
+    range_start: 0
+    range_end:
+    sample_limit: 50000
+    field: general

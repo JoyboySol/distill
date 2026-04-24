@@ -1,6 +1,8 @@
 import argparse
+import concurrent.futures
 import csv
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -12,6 +14,11 @@ if str(PROJECT_ROOT) not in sys.path:
 from distill.runtime.manifest import load_manifest_tasks, select_manifest_tasks
 from scripts.avg_correct_tokens import summarize_average_tokens
 
+try:
+    from tqdm.auto import tqdm
+except ImportError:  # pragma: no cover
+    tqdm = None
+
 
 CSV_COLUMNS = (
     "task_name",
@@ -21,51 +28,111 @@ CSV_COLUMNS = (
     "token_sum_total",
     "avg_total_tokens",
 )
-TOKEN_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens")
 
 
-def _build_task_rows(task_name: str,
-                     output_dir: str,
-                     stream: str = "correct") -> List[Dict[str, Any]]:
+def _build_task_row(task_name: str,
+                    field: str,
+                    output_dir: str,
+                     stream: str = "correct") -> Dict[str, Any]:
     summary = summarize_average_tokens(output_dir=output_dir, stream=stream)
     token_counts = summary.get("token_field_counts") or {}
     token_sums = summary.get("token_field_sums") or {}
     avg_total_tokens = (summary.get("average_tokens") or {}).get("total_tokens")
     total_records = int(summary.get("record_count", 0) or 0)
 
-    rows: List[Dict[str, Any]] = []
-    for field in TOKEN_FIELDS:
-        rows.append({
-            "task_name": task_name,
-            "field": field,
-            "total_records": total_records,
-            "token_count_total": int(token_counts.get(field, 0) or 0),
-            "token_sum_total": int(token_sums.get(field, 0) or 0),
-            "avg_total_tokens": avg_total_tokens,
-        })
-    return rows
+    return {
+        "task_name": task_name,
+        "field": field,
+        "total_records": total_records,
+        "token_count_total": int(token_counts.get("total_tokens", 0) or 0),
+        "token_sum_total": int(token_sums.get("total_tokens", 0) or 0),
+        "avg_total_tokens": avg_total_tokens,
+    }
+
+
+def _build_task_row_from_manifest_entry(task_index: int,
+                                        task_values: Dict[str, Any],
+                                        stream: str = "correct") -> Dict[str, Any]:
+    output_dir = task_values.get("output_dir")
+    if not output_dir:
+        raise ValueError(
+            f"Task {task_values.get('task_name')!r} is missing output_dir")
+
+    row = _build_task_row(
+        task_name=str(task_values.get("task_name") or ""),
+        field=str(task_values.get("field") or ""),
+        output_dir=str(output_dir),
+        stream=stream,
+    )
+    row["_task_index"] = task_index
+    return row
 
 
 def summarize_manifest_token_stats(config_path: str,
                                    task_name: Optional[str] = None,
-                                   stream: str = "correct") -> List[Dict[str, Any]]:
+                                   stream: str = "correct",
+                                   max_workers: Optional[int] = None,
+                                   show_progress: bool = False) -> List[Dict[str, Any]]:
     manifest_path = Path(config_path).expanduser().resolve()
     task_values_list = select_manifest_tasks(load_manifest_tasks(manifest_path),
                                              task_name=task_name)
 
+    field_order: Dict[str, int] = {}
+    indexed_tasks = []
+    for task_index, task_values in enumerate(task_values_list):
+        field = str(task_values.get("field") or "")
+        if field not in field_order:
+            field_order[field] = len(field_order)
+        indexed_tasks.append((task_index, task_values))
+
+    if max_workers is None:
+        cpu_count = os.cpu_count() or 1
+        max_workers = min(max(1, cpu_count), max(1, len(indexed_tasks)))
+    else:
+        max_workers = max(1, int(max_workers))
+
     rows: List[Dict[str, Any]] = []
-    for task_values in task_values_list:
-        output_dir = task_values.get("output_dir")
-        if not output_dir:
-            raise ValueError(
-                f"Task {task_values.get('task_name')!r} is missing output_dir in {manifest_path}"
-            )
-        rows.extend(
-            _build_task_rows(
-                task_name=str(task_values.get("task_name") or ""),
-                output_dir=str(output_dir),
-                stream=stream,
-            ))
+    progress = None
+    if show_progress and tqdm is not None:
+        progress = tqdm(total=len(indexed_tasks),
+                        desc="Summarizing tasks",
+                        unit="task",
+                        dynamic_ncols=True)
+
+    try:
+        if max_workers == 1:
+            for task_index, task_values in indexed_tasks:
+                row = _build_task_row_from_manifest_entry(task_index,
+                                                          task_values,
+                                                          stream=stream)
+                row["_field_order"] = field_order[str(row.get("field") or "")]
+                rows.append(row)
+                if progress is not None:
+                    progress.update(1)
+        else:
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=max_workers) as executor:
+                futures = [
+                    executor.submit(_build_task_row_from_manifest_entry,
+                                    task_index,
+                                    task_values,
+                                    stream)
+                    for task_index, task_values in indexed_tasks
+                ]
+                for future in concurrent.futures.as_completed(futures):
+                    row = future.result()
+                    row["_field_order"] = field_order[str(row.get("field") or "")]
+                    rows.append(row)
+                    if progress is not None:
+                        progress.update(1)
+    finally:
+        if progress is not None:
+            progress.close()
+
+    rows.sort(key=lambda row: (int(row["_field_order"]), int(row["_task_index"])))
+    for row in rows:
+        row.pop("_task_index", None)
+        row.pop("_field_order", None)
     return rows
 
 
@@ -103,12 +170,21 @@ def main():
                         type=str,
                         default=None,
                         help="Optional path to also save the row payload as JSON.")
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=None,
+        help=("How many tasks to summarize in parallel. Defaults to a bounded "
+              "CPU-based value."),
+    )
     args = parser.parse_args()
 
     rows = summarize_manifest_token_stats(
         config_path=args.config,
         task_name=args.task_name,
         stream=args.stream,
+        max_workers=args.max_workers,
+        show_progress=True,
     )
 
     csv_path = Path(args.summary_csv_path)
@@ -127,6 +203,7 @@ def main():
         "task_name": args.task_name,
         "stream": args.stream,
         "row_count": len(rows),
+        "max_workers": args.max_workers,
         "summary_csv_path": str(csv_path.resolve()),
         "summary_json_path": (str(Path(args.summary_json_path).expanduser().resolve())
                                if args.summary_json_path else None),

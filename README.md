@@ -868,16 +868,19 @@ http://localhost:6765/v1
   /mnt/ssd/lvzhihao/PostTrain/distill/scripts/manifest_token_stats.py \
   --config /mnt/ssd/lvzhihao/PostTrain/distill/manifest/four_datasets_distill.yaml \
   --stream correct \
+  --max-workers 8 \
   --summary-csv-path /path/to/manifest_token_stats.csv
 ```
 
 - 默认读取 `correct` 流
 - 支持用 `--task-name some_task` 只统计 manifest 里的单个 task
+- 会显示一个总进度条，表示当前已完成多少个 task 的统计
+- 支持 `--max-workers`，按 task 并行统计，进一步利用系统资源
+- `field` 列来自 manifest 里每个 task 的 `field` 配置，可用来标记数据领域
 - CSV 列顺序固定为：
   `task_name,field,total_records,token_count_total,token_sum_total,avg_total_tokens`
-- 每个 task 会输出 3 行，`field` 分别是：
-  `prompt_tokens`、`completion_tokens`、`total_tokens`
-- `avg_total_tokens` 表示该 task 在当前 stream 下的 `total_tokens` 平均值
+- 每个 task 只输出 1 行，统计的是 `total_tokens`
+- `avg_total_tokens` 表示该 task 在当前 stream 下的平均 `total_tokens`
 
 ## 10. 依赖说明
 
