@@ -330,6 +330,27 @@ writer 在主流程收尾时，会把未 merge 的 segment 按目标大小合并
 
 正常情况下，后续 resume 会直接读取这两个文件，不需要再全量扫描历史 segment/shard 内容。只有 `.resume` 缺失或损坏时，才会做一次回退扫描来重建状态。
 
+如果把输出目录搬到另一台机器，而输入数据的绝对路径前缀变了，可以先改写
+`.resume/completed_index.jsonl` 里的 `source_file` 前缀，再继续跑：
+
+```bash
+./.venv/bin/python scripts/rewrite_completed_index_paths.py \
+  --input-path /path/to/output/.resume/completed_index.jsonl \
+  --old-prefix /mnt/hdd/lvzhihao/data/OpenCodeReasoning_with_tests/split_0 \
+  --new-prefix /data/OpenCodeReasoning_with_tests/split_0 \
+  --in-place
+```
+
+先预览会改多少行但不落盘：
+
+```bash
+./.venv/bin/python scripts/rewrite_completed_index_paths.py \
+  --input-path /path/to/output/.resume/completed_index.jsonl \
+  --old-prefix /mnt/hdd/lvzhihao/data/OpenCodeReasoning_with_tests/split_0 \
+  --new-prefix /data/OpenCodeReasoning_with_tests/split_0 \
+  --dry-run
+```
+
 ## 8. 运行方式
 
 ### 8.1 Manifest / YAML task
