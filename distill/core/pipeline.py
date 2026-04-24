@@ -297,6 +297,89 @@ class DistillPipeline:
         os.replace(temp, target)
         return summary
 
+    @staticmethod
+    def _percent(numerator: int, denominator: int) -> float:
+        if denominator <= 0:
+            return 0.0
+        return round(100.0 * numerator / denominator, 4)
+
+    def _build_interrupt_quick_stats_summary(
+            self, stream_name: str) -> Dict[str, Any]:
+        written = int(self.resume_progress["written"])
+        correct = int(self.resume_progress["correct"])
+        overlong = int(self.resume_progress["overlong"])
+
+        if stream_name == self.STREAM_CORRECT:
+            total_records = correct
+            correct_counts = {
+                "true": correct,
+            }
+            finish_reason_counts = {}
+        else:
+            total_records = written
+            unknown_count = max(0, written - correct)
+            correct_counts = {
+                "true": correct,
+                "unknown": unknown_count,
+            }
+            other_finish_reasons = max(0, written - overlong)
+            finish_reason_counts = {
+                "length": overlong,
+            }
+            if other_finish_reasons > 0:
+                finish_reason_counts["other_or_unknown"] = other_finish_reasons
+
+        if stream_name == self.STREAM_CORRECT:
+            overlong_total = 0
+            overlong_correct = 0
+        else:
+            overlong_total = overlong
+            overlong_correct = 0
+
+        return {
+            "summary_type": "interrupt_quick",
+            "stream": stream_name,
+            "total_records": total_records,
+            "judge_type_counts": {},
+            "judge_backend_counts": {},
+            "judge_status_counts": {},
+            "generation_finish_reason_counts": finish_reason_counts,
+            "correct_counts": correct_counts,
+            "overall_accuracy": None,
+            "overlong_summary": {
+                "overlong_total": overlong_total,
+                "overlong_ratio": self._percent(overlong_total, total_records),
+                "overlong_correct": overlong_correct,
+                "overlong_accuracy": None,
+            },
+            "backend_accuracy": {},
+            "math_backend_summary": {
+                "math_total": 0,
+                "math_verify_total": 0,
+                "math_rule_total": 0,
+                "math_verify_ratio": 0.0,
+                "math_rule_ratio": 0.0,
+            },
+            "math_verify_fallback_reasons": {},
+            "note": (
+                "Interrupt quick summary derived from persisted progress "
+                "counters. Detailed judge breakdowns were skipped to keep "
+                "SIGINT finalization fast. Run distill.tools.stats for a "
+                "full scan if needed."
+            ),
+        }
+
+    def _write_interrupt_quick_stats_summary(
+            self, stream_name: str) -> Dict[str, Any]:
+        summary = self._build_interrupt_quick_stats_summary(stream_name)
+        target = self._stats_summary_path(stream_name)
+        temp = target + ".tmp"
+        with open(temp, "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2, sort_keys=True)
+            f.write("\n")
+        os.replace(temp, target)
+        return summary
+
     def _merge_state_path(self, stream_name: str) -> str:
         return os.path.join(self._stream_root(stream_name), "merge_state.json")
 
@@ -1734,8 +1817,10 @@ class DistillPipeline:
                 }
 
         stats_summary = {
-            self.STREAM_ALL: self._write_stats_summary(self.STREAM_ALL),
-            self.STREAM_CORRECT: self._write_stats_summary(self.STREAM_CORRECT),
+            self.STREAM_ALL:
+            self._write_interrupt_quick_stats_summary(self.STREAM_ALL),
+            self.STREAM_CORRECT:
+            self._write_interrupt_quick_stats_summary(self.STREAM_CORRECT),
         }
         summary = {
             "merge": merge_summary,
