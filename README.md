@@ -861,6 +861,24 @@ http://localhost:6765/v1
   --output-dir /path/to/output
 ```
 
+如果你想直接读取一个 manifest，对其中每个 task 做批量 token 统计，并导出固定列顺序的 CSV：
+
+```bash
+/mnt/ssd/lvzhihao/PostTrain/distill/.venv/bin/python \
+  /mnt/ssd/lvzhihao/PostTrain/distill/scripts/manifest_token_stats.py \
+  --config /mnt/ssd/lvzhihao/PostTrain/distill/manifest/four_datasets_distill.yaml \
+  --stream correct \
+  --summary-csv-path /path/to/manifest_token_stats.csv
+```
+
+- 默认读取 `correct` 流
+- 支持用 `--task-name some_task` 只统计 manifest 里的单个 task
+- CSV 列顺序固定为：
+  `task_name,field,total_records,token_count_total,token_sum_total,avg_total_tokens`
+- 每个 task 会输出 3 行，`field` 分别是：
+  `prompt_tokens`、`completion_tokens`、`total_tokens`
+- `avg_total_tokens` 表示该 task 在当前 stream 下的 `total_tokens` 平均值
+
 ## 10. 依赖说明
 
 当前 `.venv` 里已经验证可用的关键依赖包括：
