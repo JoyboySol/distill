@@ -2,6 +2,18 @@ model: Nanbeige4.1-3B
 ports:
   - 1597-1601
 
+task_schedule: round_robin
+round_robin_chunk_size: 1250
+
+merge_every_n_writes:
+upload_every_n_merges:
+upload_merged_shards: true
+treat_no_judge_as_correct: true
+hf_repo_id: JoyboyGo/hf_data
+hf_repo_type: dataset
+hf_remote_prefix:
+hf_token:
+
 tasks:
   - task_name: opencode_reasoning_split_0
     input_dir: /mnt/hdd/lvzhihao/data/OpenCodeReasoning_with_tests/split_0
