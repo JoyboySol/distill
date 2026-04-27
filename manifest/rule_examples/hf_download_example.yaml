@@ -1,0 +1,19 @@
+tool: aria2c
+threads: 4
+jobs: 5
+dataset: true
+revision: main
+hfd_command: /mnt/ssd/yulan/bin/hfd
+
+tasks:
+  - task_name: openr1_math_220k
+    repo_id: open-r1/OpenR1-Math-220k
+    local_dir: /mnt/hdd/lvzhihao/data/OpenR1-Math-220k
+    include:
+      - "*.parquet"
+
+  - task_name: ultrachat_200k
+    repo_id: HuggingFaceH4/ultrachat_200k
+    local_dir: /mnt/hdd/lvzhihao/data/ultrachat_200k
+    exclude:
+      - "*.md"

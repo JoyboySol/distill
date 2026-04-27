@@ -5,7 +5,7 @@
 它现在按职责分层了，只保留新路径：
 
 - `distill/cli.py`
-  主 CLI 入口，负责解析命令行和 YAML task config。
+  统一 CLI 入口，负责分发子命令、解析命令行和 YAML task config。
 - `distill/__main__.py`
   支持直接运行 `python -m distill`。
 - `distill/runtime/`
@@ -15,8 +15,10 @@
 - `distill/common/`
   通用工具函数。
 - `distill/tools/`
-  辅助脚本，例如统计。
-旧的顶层兼容文件已经移除，请统一使用新路径：
+  包内工具逻辑，例如统计。
+- `distill/commands/`
+  统一 CLI 的子命令实现。
+旧脚本入口现在只保留兼容跳转，请统一使用新路径：
 
 - `distill.cli`
 - `distill.runtime.*`
@@ -334,7 +336,7 @@ writer 在主流程收尾时，会把未 merge 的 segment 按目标大小合并
 `.resume/completed_index.jsonl` 里的 `source_file` 前缀，再继续跑：
 
 ```bash
-./.venv/bin/python scripts/rewrite_completed_index_paths.py \
+./.venv/bin/python -m distill rewrite-completed-index-paths \
   --input-path /path/to/output/.resume/completed_index.jsonl \
   --old-prefix /mnt/hdd/lvzhihao/data/OpenCodeReasoning_with_tests/split_0 \
   --new-prefix /data/OpenCodeReasoning_with_tests/split_0 \
@@ -344,7 +346,7 @@ writer 在主流程收尾时，会把未 merge 的 segment 按目标大小合并
 先预览会改多少行但不落盘：
 
 ```bash
-./.venv/bin/python scripts/rewrite_completed_index_paths.py \
+./.venv/bin/python -m distill rewrite-completed-index-paths \
   --input-path /path/to/output/.resume/completed_index.jsonl \
   --old-prefix /mnt/hdd/lvzhihao/data/OpenCodeReasoning_with_tests/split_0 \
   --new-prefix /data/OpenCodeReasoning_with_tests/split_0 \
@@ -367,26 +369,26 @@ writer 在主流程收尾时，会把未 merge 的 segment 按目标大小合并
 你可以先列出当前可用 YAML：
 
 ```bash
-./.venv/bin/python -m distill --list-configs
+./.venv/bin/python -m distill list-configs
 ```
 
 按名称直接运行某个任务：
 
 ```bash
-./.venv/bin/python -m distill --config-name local_parquet_task
+./.venv/bin/python -m distill run --config-name local_parquet_task
 ```
 
 或者显式给路径：
 
 ```bash
-./.venv/bin/python -m distill \
+./.venv/bin/python -m distill run \
   --config manifest/rule_examples/local_parquet_task.yaml
 ```
 
 CLI 参数会覆盖 YAML 里的同名字段，所以你可以这样临时改：
 
 ```bash
-./.venv/bin/python -m distill \
+./.venv/bin/python -m distill run \
   --config-name local_parquet_task \
   --range-start 100 \
   --range-end 200
@@ -448,7 +450,96 @@ CLI 参数会覆盖 YAML 里的同名字段，所以你可以这样临时改：
 
 `base_urls` 和 `ports` 都支持列表写法，比较适合 YAML。
 
-### 8.2 单文件多 task
+### 8.2 下载 Hugging Face 数据
+
+现在也支持把你本机已经可用的 `hfd` 包装成统一命令：
+
+```bash
+./.venv/bin/python -m distill download \
+  --repo-id HuggingFaceH4/ultrachat_200k \
+  --dataset \
+  --local-dir /mnt/hdd/lvzhihao/data/ultrachat_200k \
+  --hfd-command /mnt/ssd/yulan/bin/hfd
+```
+
+常用参数包括：
+
+- `--repo-id`
+  Hugging Face 仓库 ID，例如 `org/repo`
+- `--local-dir`
+  下载到本地的目标目录
+- `--include`
+  只下载匹配模式的文件，可传多个值
+- `--exclude`
+  排除匹配模式的文件，可传多个值
+- `--dataset`
+  按 dataset 仓库下载
+- `--tool`
+  传给 `hfd` 的下载后端，目前支持 `aria2c` 或 `wget`
+- `-x`, `--threads`
+  单文件下载线程数
+- `-j`, `--jobs`
+  并发下载数
+- `--revision`
+  指定分支、tag 或 revision
+- `--hf-username`
+  需要鉴权时传 Hugging Face 用户名
+- `--hf-token`
+  需要鉴权时传 Hugging Face token
+- `--hfd-command`
+  `hfd` 可执行文件路径，默认使用 `PATH` 里的 `hfd`
+
+同样也支持 manifest 驱动。示例见：
+
+- `manifest/rule_examples/hf_download_example.yaml`
+
+你可以直接按名字运行：
+
+```bash
+./.venv/bin/python -m distill download \
+  --config-name hf_download_example
+```
+
+也可以指定 manifest 文件：
+
+```bash
+./.venv/bin/python -m distill download \
+  --config manifest/rule_examples/hf_download_example.yaml
+```
+
+如果 manifest 里有多个 task，也可以只跑一个：
+
+```bash
+./.venv/bin/python -m distill download \
+  --config manifest/rule_examples/hf_download_example.yaml \
+  --task ultrachat_200k
+```
+
+`download` 命令支持写进 manifest 的字段包括：
+
+- `task_name`
+- `repo_id`
+- `local_dir`
+- `output_dir`
+- `include`
+- `exclude`
+- `dataset`
+- `tool`
+- `threads`
+- `jobs`
+- `revision`
+- `hf_username`
+- `hf_token`
+- `hfd_command`
+
+其中：
+
+- `local_dir` 是下载目录的首选字段
+- 如果没写 `local_dir`，会自动回退到 `output_dir`
+- `include` 和 `exclude` 既可以写 YAML 列表，也可以在命令行里传多个值
+- `hf_token` 和 `hf_username` 同样支持 `${ENV}` / `$ENV` 形式的环境变量占位
+
+### 8.3 单文件多 task
 
 如果你有批量跑的需求，现在更推荐把多个 task 放进同一个 manifest YAML：
 
@@ -493,12 +584,12 @@ tasks:
 示例：
 
 ```bash
-./.venv/bin/python -m distill \
+./.venv/bin/python -m distill run \
   --config manifest/rule_examples/batch_tasks.yaml
 ```
 
 ```bash
-./.venv/bin/python -m distill \
+./.venv/bin/python -m distill run \
   --config manifest/rule_examples/batch_tasks.yaml \
   --task openthoughts3_math_part2
 ```
@@ -524,8 +615,8 @@ tasks:
   当 YAML 里包含多个 task 时，只运行指定 `task_name`。
 - `--manifest-dir`
   指定 manifest 根目录，默认是仓库下的 `manifest/`。
-- `--list-configs`
-  列出 manifest 下可用的 YAML 文件。
+- `list-configs`
+  显式子命令，用来列出 manifest 下可用的 YAML 文件。
 - `--input-dir`
   输入目录。
 - `--output-dir`
@@ -777,8 +868,7 @@ http://localhost:6765/v1
 并同步统计 token 总数与平均 token，可以直接运行：
 
 ```bash
-/mnt/ssd/lvzhihao/PostTrain/distill/.venv/bin/python \
-  /mnt/ssd/lvzhihao/PostTrain/distill/scripts/merge_correct_segments.py \
+./.venv/bin/python -m distill merge-correct-segments \
   --output-dir /path/to/output \
   --stream correct \
   --summary-path /path/to/output/correct_merge_summary.json
@@ -796,8 +886,7 @@ http://localhost:6765/v1
 可以在同一个脚本里附带开启上传：
 
 ```bash
-/mnt/ssd/lvzhihao/PostTrain/distill/.venv/bin/python \
-  /mnt/ssd/lvzhihao/PostTrain/distill/scripts/merge_correct_segments.py \
+./.venv/bin/python -m distill merge-correct-segments \
   --output-dir /path/to/output \
   --stream correct \
   --upload-to-hf \
@@ -816,8 +905,7 @@ http://localhost:6765/v1
 也可以直接让这个脚本按 manifest 里的每个 task 去批量 merge + upload：
 
 ```bash
-/mnt/ssd/lvzhihao/PostTrain/distill/.venv/bin/python \
-  /mnt/ssd/lvzhihao/PostTrain/distill/scripts/merge_correct_segments.py \
+./.venv/bin/python -m distill merge-correct-segments \
   --config /mnt/ssd/lvzhihao/PostTrain/distill/manifest/four_datasets_distill.yaml \
   --stream correct
 ```
@@ -852,8 +940,7 @@ http://localhost:6765/v1
 常见的恢复性重跑命令会是：
 
 ```bash
-/mnt/ssd/lvzhihao/PostTrain/distill/.venv/bin/python \
-  /mnt/ssd/lvzhihao/PostTrain/distill/scripts/merge_correct_segments.py \
+./.venv/bin/python -m distill merge-correct-segments \
   --config /mnt/ssd/lvzhihao/PostTrain/distill/manifest/four_datasets_distill.yaml \
   --stream correct \
   --force-merge \
@@ -877,16 +964,14 @@ http://localhost:6765/v1
 如果你只想看 `correct` 数据的平均 token，而不合并 shard，也可以运行：
 
 ```bash
-/mnt/ssd/lvzhihao/PostTrain/distill/.venv/bin/python \
-  /mnt/ssd/lvzhihao/PostTrain/distill/scripts/avg_correct_tokens.py \
+./.venv/bin/python -m distill avg-correct-tokens \
   --output-dir /path/to/output
 ```
 
 如果你想直接读取一个 manifest，对其中每个 task 做批量 token 统计，并导出固定列顺序的 CSV：
 
 ```bash
-/mnt/ssd/lvzhihao/PostTrain/distill/.venv/bin/python \
-  /mnt/ssd/lvzhihao/PostTrain/distill/scripts/manifest_token_stats.py \
+./.venv/bin/python -m distill manifest-token-stats \
   --config /mnt/ssd/lvzhihao/PostTrain/distill/manifest/four_datasets_distill.yaml \
   --stream correct \
   --max-workers 8 \
@@ -971,3 +1056,17 @@ http://localhost:6765/v1
   --shard-size-mb 200 \
   --write-retries 3
 ```
+如果你已经在当前环境里执行过：
+
+```bash
+./.venv/bin/pip install -e .
+```
+
+也可以直接使用安装后的 `distill` 命令，例如：
+
+```bash
+distill list-configs
+distill run --config-name local_parquet_task
+```
+
+为了平滑迁移，旧的 `scripts/*.py` 仍然可以运行，但会打印 deprecation 提示。
