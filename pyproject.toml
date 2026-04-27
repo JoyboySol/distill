@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "distill-cli"
+version = "0.1.0"
+description = "Unified CLI for the distillation pipeline and maintenance tools."
+readme = "README.md"
+requires-python = ">=3.10"
+
+[project.scripts]
+distill = "distill.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["distill*"]

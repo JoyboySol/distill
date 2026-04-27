@@ -1,7 +1,9 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import distill.cli as root_cli
 from distill.cli import DEFAULT_PIPELINE_VALUES, _build_config_from_values, \
     _normalize_config_keys, build_configs, build_parser
 
@@ -81,6 +83,46 @@ class CliConfigTests(unittest.TestCase):
 
             self.assertTrue(config.upload_merged_shards)
             self.assertEqual(config.judge_mode, "none")
+
+
+class RootCliTests(unittest.TestCase):
+
+    def test_build_root_parser_accepts_explicit_run_subcommand(self):
+        parser = root_cli.build_root_parser()
+        args = parser.parse_args(["run", "--config", "/tmp/task.yaml"])
+
+        self.assertEqual(args.command, "run")
+
+    def test_build_root_parser_accepts_stats_subcommand(self):
+        parser = root_cli.build_root_parser()
+        args = parser.parse_args(["stats", "--output-dir", "/tmp/out"])
+
+        self.assertEqual(args.command, "stats")
+
+    def test_build_root_parser_accepts_download_subcommand(self):
+        parser = root_cli.build_root_parser()
+        args = parser.parse_args(["download", "--repo-id", "org/repo"])
+
+        self.assertEqual(args.command, "download")
+
+    def test_main_routes_legacy_pipeline_args_to_run_dispatch(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "task.yaml"
+            config_path.write_text("task_name: sample\nports: 1597\n",
+                                   encoding="utf-8")
+
+            with patch("distill.cli._dispatch_legacy_run") as mock_dispatch:
+                root_cli.main(["--config", str(config_path)])
+
+            mock_dispatch.assert_called_once()
+
+    def test_main_dispatches_explicit_subcommand_via_root_namespace(self):
+        with patch("distill.cli._run_command_from_namespace") as mock_run:
+            root_cli.main(["list-configs", "--manifest-dir", "/tmp/manifest"])
+
+        self.assertEqual(mock_run.call_count, 1)
+        namespace = mock_run.call_args.args[0]
+        self.assertEqual(namespace.command, "list-configs")
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@ import argparse
 import glob
 import json
 import os
+import sys
 from collections import Counter
 from typing import Any, Dict, Iterable
 
@@ -121,22 +122,31 @@ def print_summary(summary: Dict[str, Any]):
     print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
 
 
-def main():
-    parser = argparse.ArgumentParser()
+def build_parser(add_help: bool = True) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(add_help=add_help)
     parser.add_argument("--output-dir", required=True, type=str)
     parser.add_argument("--stream",
                         type=str,
                         default="all",
                         choices=["all", "correct"])
     parser.add_argument("--save-json", type=str, default=None)
-    args = parser.parse_args()
+    return parser
 
+
+def run_namespace(args: argparse.Namespace) -> Dict[str, Any]:
     summary = summarize(iter_records(args.output_dir, args.stream))
     print_summary(summary)
 
     if args.save_json:
         with open(args.save_json, "w", encoding="utf-8") as f:
             json.dump(summary, f, ensure_ascii=False, indent=2, sort_keys=True)
+    return summary
+
+
+def main(argv: list[str] | None = None):
+    parser = build_parser()
+    args = parser.parse_args(argv if argv is not None else sys.argv[1:])
+    run_namespace(args)
 
 
 if __name__ == "__main__":
