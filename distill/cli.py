@@ -155,8 +155,10 @@ def main(argv: Optional[Sequence[str]] = None):
         return 0
     if tokens[0] in COMMAND_NAMES:
         args = build_root_parser().parse_args(tokens)
-        return _run_command_from_namespace(args)
-    return _dispatch_legacy_run(tokens)
+        _run_command_from_namespace(args)
+        return 0
+    _dispatch_legacy_run(tokens)
+    return 0
 
 
 __all__ = [

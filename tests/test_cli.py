@@ -124,6 +124,15 @@ class RootCliTests(unittest.TestCase):
         namespace = mock_run.call_args.args[0]
         self.assertEqual(namespace.command, "list-configs")
 
+    def test_main_returns_zero_for_explicit_subcommand_even_if_handler_returns_data(self):
+        with patch("distill.cli._run_command_from_namespace",
+                   return_value=[{
+                       "task_name": "sample"
+                   }]):
+            result = root_cli.main(["download", "--repo-id", "org/repo"])
+
+        self.assertEqual(result, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
