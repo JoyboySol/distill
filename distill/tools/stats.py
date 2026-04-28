@@ -24,6 +24,18 @@ def pct(numerator: int, denominator: int) -> float:
     return 100.0 * numerator / denominator
 
 
+def _normalize_judge_detail(value: Any) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
 def summarize(records: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     total = 0
     judge_type_counter: Counter = Counter()
@@ -44,7 +56,7 @@ def summarize(records: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         judge_status = row.get("judge_status") or "none"
         finish_reason = row.get("generation_finish_reason") or "none"
         is_correct = row.get("is_correct")
-        judge_detail = row.get("judge_detail") or {}
+        judge_detail = _normalize_judge_detail(row.get("judge_detail"))
 
         judge_type_counter[judge_type] += 1
         judge_backend_counter[judge_backend] += 1

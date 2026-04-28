@@ -502,6 +502,57 @@ class MergeCorrectSegmentsTests(unittest.TestCase):
             self.assertEqual(row["hf_uploaded"], "2")
             self.assertEqual(row["hf_skipped"], "1")
 
+    def test_merge_serializes_dynamic_judge_detail_for_parquet(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            self._write_segment(
+                root,
+                0,
+                [{
+                    "prompt_tokens": 1,
+                    "completion_tokens": 2,
+                    "total_tokens": 3,
+                    "is_correct": True,
+                    "judge_detail": {
+                        "constraint_results": [{
+                            "source": "a",
+                            "kind": "num_sentences",
+                            "passed": True,
+                            "detail": {
+                                "expected": 5,
+                                "actual": 5,
+                            },
+                        }],
+                    },
+                }, {
+                    "prompt_tokens": 4,
+                    "completion_tokens": 5,
+                    "total_tokens": 9,
+                    "is_correct": True,
+                    "judge_detail": {
+                        "constraint_results": [{
+                            "source": "b",
+                            "kind": "specific_ending",
+                            "passed": False,
+                            "detail": {
+                                "expected": "done",
+                            },
+                        }],
+                    },
+                }],
+            )
+
+            summary = merge_correct_segments(str(root), shard_size_mb=1)
+
+            self.assertEqual(summary["merged_segments_this_run"], 1)
+            shard_files = sorted((root / "correct" / "shards").glob("shard_*.parquet"))
+            self.assertEqual(len(shard_files), 1)
+            rows = pq.read_table(shard_files[0]).to_pylist()
+            self.assertEqual(len(rows), 2)
+            self.assertIsInstance(rows[0]["judge_detail"], str)
+            self.assertIn("constraint_results", rows[0]["judge_detail"])
+            self.assertIsInstance(rows[1]["judge_detail"], str)
+
 
 if __name__ == "__main__":
     unittest.main()

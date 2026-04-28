@@ -49,7 +49,8 @@ def iter_rows(input_dir: Path, limit: int, batch_size: int = 128):
 
 def evaluate_rows(input_dir: Path,
                   limit: int,
-                  progress_every: int = 0) -> Dict[str, object]:
+                  progress_every: int = 0,
+                  judge_mode: str | None = None) -> Dict[str, object]:
     status_counter: Counter = Counter()
     judge_type_counter: Counter = Counter()
     backend_counter: Counter = Counter()
@@ -63,7 +64,7 @@ def evaluate_rows(input_dir: Path,
             "role": "assistant",
             "content": str(assistant_output),
         }]
-        result = judge_output(row, messages)
+        result = judge_output(row, messages, judge_mode=judge_mode)
 
         total += 1
         status_counter[result.get("judge_status")] += 1
@@ -105,6 +106,7 @@ def build_parser(add_help: bool = True) -> argparse.ArgumentParser:
     parser.add_argument("--input-dir", required=True, type=Path)
     parser.add_argument("--limit", type=int, default=1000)
     parser.add_argument("--progress-every", type=int, default=0)
+    parser.add_argument("--judge-mode", type=str)
     parser.add_argument("--json", action="store_true")
     return parser
 
@@ -112,7 +114,8 @@ def build_parser(add_help: bool = True) -> argparse.ArgumentParser:
 def run_namespace(args: argparse.Namespace) -> Dict[str, object]:
     summary = evaluate_rows(args.input_dir,
                             args.limit,
-                            progress_every=args.progress_every)
+                            progress_every=args.progress_every,
+                            judge_mode=args.judge_mode)
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True))
         return summary

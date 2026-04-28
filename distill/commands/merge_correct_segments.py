@@ -197,9 +197,22 @@ def _average_tokens_from_state(state: Dict[str, Any]) -> Dict[str, float | None]
 def _write_parquet_shard(shard_path: Path, records: List[Dict[str, Any]]) -> None:
     shard_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = shard_path.with_suffix(shard_path.suffix + ".tmp")
-    table = pa.Table.from_pylist(records)
+    normalized_records = [_normalize_record_for_parquet(record) for record in records]
+    table = pa.Table.from_pylist(normalized_records)
     pq.write_table(table, tmp_path)
     tmp_path.replace(shard_path)
+
+
+def _normalize_record_for_parquet(record: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(record)
+    judge_detail = normalized.get("judge_detail")
+    if isinstance(judge_detail, (dict, list)):
+        normalized["judge_detail"] = json.dumps(
+            judge_detail,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    return normalized
 
 
 def _remove_existing_shards(shard_dir: Path) -> None:

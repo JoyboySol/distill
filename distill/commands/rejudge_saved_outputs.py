@@ -9,6 +9,7 @@ from typing import Dict, Iterable, Tuple
 import pyarrow.parquet as pq
 
 from distill.core.judge import judge_output
+from distill.core.judges.instruction_following import instruction_following_hint
 
 
 logger = logging.getLogger("rejudge_saved_outputs")
@@ -29,11 +30,52 @@ class RowCache:
         return self._cache[source_file][source_row]
 
 
-def rejudge_record(record: Dict[str, object], row_cache: RowCache) -> Tuple[bool, Dict[str, object]]:
+def _is_instruction_following_record(record: Dict[str, object],
+                                     row_data: Dict[str, object]) -> bool:
+    if record.get("judge_type") == "instruction_following":
+        return True
+    return instruction_following_hint(row_data) is not None
+
+
+def _force_pass_instruction_following(
+        record: Dict[str, object]) -> Dict[str, object]:
+    if record.get("generation_finish_reason") == "length":
+        return {
+            "judge_type": "instruction_following",
+            "judge_backend": "instruction_following_force_pass_v1",
+            "judge_status": "not_applicable_overlong",
+            "judge_detail": {
+                "force_passed": False,
+                "overlong_blocked": True,
+                "reason": "force_pass_if_overlong_blocked",
+            },
+            "is_correct": None,
+        }
+    return {
+        "judge_type": "instruction_following",
+        "judge_backend": "instruction_following_force_pass_v1",
+        "judge_status": "pass",
+        "judge_detail": {
+            "force_passed": True,
+            "reason": "force_pass_if",
+        },
+        "is_correct": True,
+    }
+
+
+def rejudge_record(record: Dict[str, object],
+                   row_cache: RowCache,
+                   judge_mode: str | None = None,
+                   force_pass_if: bool = False) -> Tuple[bool, Dict[str, object]]:
     source_file = str(record["source_file"])
     source_row = int(record["source_row"])
     row_data = row_cache.get_row(source_file, source_row)
-    new_result = judge_output(row_data, record["messages"])
+    if force_pass_if and _is_instruction_following_record(record, row_data):
+        new_result = _force_pass_instruction_following(record)
+    else:
+        new_result = judge_output(row_data,
+                                  record["messages"],
+                                  judge_mode=judge_mode)
 
     old_tuple = (
         record.get("judge_type"),
@@ -96,7 +138,9 @@ def segment_has_suspicious_records(segment_path: Path) -> bool:
 def rejudge_segments(segment_dir: Path,
                      limit: int = 0,
                      suspicious_only: bool = False,
-                     progress_every: int = 50) -> Dict[str, object]:
+                     progress_every: int = 50,
+                     judge_mode: str | None = None,
+                     force_pass_if: bool = False) -> Dict[str, object]:
     row_cache = RowCache()
     counters: Counter = Counter()
     changed_examples = []
@@ -138,7 +182,10 @@ def rejudge_segments(segment_dir: Path,
                     continue
                 processed += 1
                 file_rejudged += 1
-                changed, updated = rejudge_record(record, row_cache)
+                changed, updated = rejudge_record(record,
+                                                  row_cache,
+                                                  judge_mode=judge_mode,
+                                                  force_pass_if=force_pass_if)
                 if changed:
                     changed_in_file += 1
                     counters["changed_records"] += 1
@@ -229,6 +276,8 @@ def build_parser(add_help: bool = True) -> argparse.ArgumentParser:
     parser.add_argument("--segment-dir", required=True, type=Path)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--suspicious-only", action="store_true")
+    parser.add_argument("--judge-mode", type=str)
+    parser.add_argument("--force-pass-if", action="store_true")
     parser.add_argument("--progress-every", type=int, default=50)
     parser.add_argument("--log-path", type=Path)
     parser.add_argument("--summary-path", type=Path)
@@ -243,6 +292,8 @@ def run_namespace(args: argparse.Namespace) -> Dict[str, object]:
         limit=args.limit,
         suspicious_only=args.suspicious_only,
         progress_every=args.progress_every,
+        judge_mode=args.judge_mode,
+        force_pass_if=args.force_pass_if,
     )
     if args.summary_path is not None:
         args.summary_path.parent.mkdir(parents=True, exist_ok=True)
