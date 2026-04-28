@@ -117,9 +117,11 @@ def _resolve_optional_env_text(raw: Any) -> Any:
     if not text:
         return None
     if text.startswith("${") and text.endswith("}") and len(text) > 3:
-        return os.getenv(text[2:-1], "")
+        resolved = os.getenv(text[2:-1], "")
+        return resolved or None
     if text.startswith("$") and len(text) > 1:
-        return os.getenv(text[1:], "")
+        resolved = os.getenv(text[1:], "")
+        return resolved or None
     return raw
 
 
@@ -404,8 +406,8 @@ def _build_config_from_values(values: Dict[str, Any]) -> PipelineConfig:
     else:
         resolved_failure_log = str(PROJECT_ROOT / "failures" / unique_failure_log)
     base_urls = resolve_base_urls(
-        direct_urls=values["base_urls"],
-        ports_text=values["ports"],
+        direct_urls=_resolve_optional_env_text(values["base_urls"]),
+        ports_text=_resolve_optional_env_text(values["ports"]),
     )
     normalized_judge_mode = normalize_judge_mode(values.get("judge_mode",
                                                             "auto"))
@@ -532,6 +534,12 @@ def _run_round_robin_configs(configs: List[PipelineConfig], pipeline_cls):
             logger.info("Round-robin task %s -> sample_limit=%s",
                         base_config.task_name or "<unnamed>", next_limit)
             summary = asyncio.run(_run_pipeline_once(run_config, pipeline_cls))
+            if summary.get("interrupted"):
+                logger.info(
+                    "Stopping round-robin scheduling after interrupt in task %s",
+                    base_config.task_name or "<unnamed>",
+                )
+                return
             state["current_limit"] = next_limit
 
             if total_limit is not None and next_limit >= int(total_limit):
@@ -560,7 +568,10 @@ def run_resolved_configs(configs: List[PipelineConfig], pipeline_cls=None):
         logger.info("Failure log path: %s", config.failure_log)
         logger.info("Resolved %s backend(s): %s", len(config.base_urls),
                     ", ".join(config.base_urls))
-        asyncio.run(_run_pipeline_once(config, pipeline_cls))
+        summary = asyncio.run(_run_pipeline_once(config, pipeline_cls))
+        if summary.get("interrupted"):
+            logger.info("Stopping remaining task scheduling after interrupt.")
+            return
 
 
 def run_list_configs_namespace(args: argparse.Namespace):

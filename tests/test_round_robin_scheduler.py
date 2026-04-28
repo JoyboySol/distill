@@ -77,6 +77,54 @@ class RoundRobinSchedulerTests(unittest.TestCase):
             ("task_a", 4),
         ])
 
+    def test_round_robin_stops_all_scheduling_after_interrupt(self):
+        configs = [
+            self._build_config("task_a", 6, chunk_size=2),
+            self._build_config("task_b", 6, chunk_size=2),
+        ]
+        calls = []
+
+        class _FakePipeline:
+
+            def __init__(self, config):
+                self.config = config
+
+            async def run(self):
+                calls.append((self.config.task_name, self.config.sample_limit))
+                if self.config.task_name == "task_a":
+                    return {"input_exhausted": False, "interrupted": True}
+                return {"input_exhausted": False, "interrupted": False}
+
+        run_resolved_configs(configs, pipeline_cls=_FakePipeline)
+
+        self.assertEqual(calls, [
+            ("task_a", 2),
+        ])
+
+    def test_serial_stops_scheduling_after_interrupt(self):
+        configs = [
+            self._build_config("task_a", 6, task_schedule="serial"),
+            self._build_config("task_b", 6, task_schedule="serial"),
+        ]
+        calls = []
+
+        class _FakePipeline:
+
+            def __init__(self, config):
+                self.config = config
+
+            async def run(self):
+                calls.append((self.config.task_name, self.config.sample_limit))
+                if self.config.task_name == "task_a":
+                    return {"input_exhausted": False, "interrupted": True}
+                return {"input_exhausted": False, "interrupted": False}
+
+        run_resolved_configs(configs, pipeline_cls=_FakePipeline)
+
+        self.assertEqual(calls, [
+            ("task_a", 6),
+        ])
+
 
 if __name__ == "__main__":
     unittest.main()
