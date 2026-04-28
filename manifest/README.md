@@ -43,5 +43,6 @@ tasks:
 ./.venv/bin/python -m distill --config-name local_parquet_task
 ./.venv/bin/python -m distill --config manifest/rule_examples/local_parquet_task.yaml
 ./.venv/bin/python -m distill --config manifest/rule_examples/batch_tasks.yaml
+./.venv/bin/python -m distill --config manifest/rule_examples/instruction_following_datasets.yaml
 ./.venv/bin/python -m distill --config manifest/rule_examples/batch_tasks.yaml --task openthoughts3_math_part2
 ```

@@ -1,0 +1,82 @@
+# Edit the shared serving/model settings below as needed.
+model: Nanbeige4.1-3B
+ports:
+  - 6758-6765
+
+concurrency: 768
+judge_concurrency: 32
+active_files: 6
+rollout_count: 1
+max_tokens: 16000
+batch_size: 1000
+
+segment_size_mb: 4
+segment_flush_interval_sec: 10
+shard_size_mb: 200
+write_retries: 3
+
+# Multi-task scheduling:
+task_schedule: round_robin
+round_robin_chunk_size: 500
+
+# Periodic local merge / remote upload:
+merge_every_n_writes:
+upload_every_n_merges:
+upload_merged_shards: true
+treat_no_judge_as_correct: true
+hf_repo_id: JoyboyGo/hf_data
+hf_repo_type: dataset
+hf_remote_prefix:
+hf_token:
+
+tasks:
+  - task_name: ultrachat_200k
+    input_dir: /mnt/hdd/lvzhihao/data/ultrachat_200k
+    output_dir: /mnt/hdd/lvzhihao/output/distill/ultrachat_200k
+    failure_log: ultrachat_200k_failed.jsonl
+    file_pattern: data/train_*.parquet
+    judge_mode: none
+    complete_trailing_user_turn: true
+    input_field: messages
+    range_start: 0
+    range_end:
+    sample_limit: 50000
+    # Multi-turn chat distillation, no judge.
+
+  - task_name: no_robots_train_sft
+    input_dir: /mnt/hdd/lvzhihao/data/no_robots
+    output_dir: /mnt/hdd/lvzhihao/output/distill/no_robots_train_sft
+    failure_log: no_robots_train_sft_failed.jsonl
+    file_pattern: data/train_sft-*.parquet
+    input_field: messages
+    judge_mode: none
+    complete_trailing_user_turn: true
+    range_start: 0
+    range_end:
+    sample_limit:
+    # Mixed open-ended instruction/chat SFT data. Prefer no hard auto-judge.
+
+  - task_name: tulu_3_personas_instruction_following
+    input_dir: /mnt/hdd/lvzhihao/data/tulu-3-sft-personas-instruction-following
+    output_dir: /mnt/hdd/lvzhihao/output/distill/tulu-3-sft-personas-instruction-following
+    failure_log: tulu_3_personas_instruction_following_failed.jsonl
+    file_pattern: data/train-*.parquet
+    input_field: prompt
+    judge_mode: instruction_following
+    range_start: 0
+    range_end:
+    sample_limit:
+    # Prompt-based SFT data with verifiable constraints in `constraints`.
+
+  - task_name: if_multi_constraints_upto5
+    input_dir: /mnt/hdd/lvzhihao/data/IF_multi_constraints_upto5
+    output_dir: /mnt/hdd/lvzhihao/output/distill/IF_multi_constraints_upto5
+    failure_log: IF_multi_constraints_upto5_failed.jsonl
+    file_pattern: data/train-*.parquet
+    input_field: messages
+    judge_mode: instruction_following
+    complete_trailing_user_turn: true
+    range_start: 0
+    range_end:
+    sample_limit:
+    # User-turn messages plus structured `ground_truth`; generate one final assistant turn.

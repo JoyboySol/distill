@@ -1,19 +1,25 @@
 tool: aria2c
-threads: 4
-jobs: 5
+threads: 8
+jobs: 10
 dataset: true
 revision: main
 hfd_command: /mnt/ssd/yulan/bin/hfd
 
 tasks:
-  - task_name: openr1_math_220k
-    repo_id: open-r1/OpenR1-Math-220k
-    local_dir: /mnt/hdd/lvzhihao/data/OpenR1-Math-220k
+  - task_name: no_robots
+    repo_id: HuggingFaceH4/no_robots
+    local_dir: /mnt/hdd/lvzhihao/data/no_robots
     include:
       - "*.parquet"
 
-  - task_name: ultrachat_200k
-    repo_id: HuggingFaceH4/ultrachat_200k
-    local_dir: /mnt/hdd/lvzhihao/data/ultrachat_200k
-    exclude:
-      - "*.md"
+  - task_name: tulu-3-sft-personas-instruction-following
+    repo_id: allenai/tulu-3-sft-personas-instruction-following
+    local_dir: /mnt/hdd/lvzhihao/data/tulu-3-sft-personas-instruction-following
+    include:
+      - "**"
+
+  - task_name: IF_multi_constraints_upto5
+    repo_id: allenai/IF_multi_constraints_upto5
+    local_dir: /mnt/hdd/lvzhihao/data/IF_multi_constraints_upto5
+    include:
+      - "**"

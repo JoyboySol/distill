@@ -6,6 +6,7 @@ failure_log: failed_tasks.jsonl
 
 file_pattern: "*.parquet"
 input_field: question
+judge_mode: auto
 label_field: answer
 
 model: Qwen3-30B-A3B-Thinking-2507

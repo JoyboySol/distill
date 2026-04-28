@@ -63,20 +63,18 @@ tasks:
     failure_log: nemotron_stem_mcq_failed.jsonl
     file_pattern: stem-*.parquet
     input_field: messages
+    judge_mode: mcq
     range_start: 0
     range_end:
     sample_limit: 50000
     # Auto-judged with mcq_boxed from reference assistant \\boxed{A-J}.
 
-  - task_name: ultrachat_200k
-    input_dir: /mnt/hdd/lvzhihao/data/ultrachat_200k
-    output_dir: /mnt/hdd/lvzhihao/output/distill/ultrachat_200k
-    failure_log: ultrachat_200k_failed.jsonl
-    file_pattern: data/train_*.parquet
-    judge_mode: none
-    complete_trailing_user_turn: true
-    input_field: messages
-    range_start: 0
-    range_end:
-    sample_limit: 50000
-    # Multi-turn chat distillation, no judge.
+
+  - task_name: opencode_reasoning_split_0
+    input_dir: /mnt/hdd/lvzhihao/data/OpenCodeReasoning_with_tests/split_0
+    output_dir: /mnt/hdd/lvzhihao/output/OpenCodeReasoning-distill/split_0
+    failure_log: opencode_reasoning_split_0_failed.jsonl
+    file_pattern: "*.parquet"
+    input_field: input
+    judge_mode: code
+    label_field:

@@ -33,6 +33,7 @@ tasks:
     failure_log: math_lighteval_failed.jsonl
     file_pattern: "*/train-*.parquet"
     input_field: problem
+    judge_mode: math
     # MATH-lighteval 的 gold answer 在 `solution` 里，最终答案包在 `\\boxed{}` 中。
     # 交给 math_verify 时会直接从 solution 里做 boxed 抽取。
     label_field: solution
@@ -45,6 +46,7 @@ tasks:
     failure_log: openr1_math_220k_failed.jsonl
     file_pattern: "all/*.parquet"
     input_field: problem
+    judge_mode: math
     # 直接走 math_verify。
     label_field: answer
     rollout_count: 4
@@ -56,6 +58,7 @@ tasks:
     failure_log: math_sft_40k_failed.jsonl
     file_pattern: train.jsonl
     input_field: question
+    judge_mode: math
     # 直接走 math_verify。
     label_field: golden_answer
     rollout_count: 4
@@ -96,6 +99,7 @@ tasks:
     failure_log: nemotron_stem_mcq_failed.jsonl
     file_pattern: stem-*.parquet
     input_field: messages
+    judge_mode: mcq
     range_start: 0
     range_end:
     sample_limit: 50000
@@ -109,6 +113,7 @@ tasks:
     failure_log: open_math_failed.jsonl
     file_pattern: train-*.parquet
     input_field: problem
+    judge_mode: math
     label_field: expected_answer
     range_start: 0
     range_end:
@@ -120,6 +125,7 @@ tasks:
     failure_log: openthoughts3_math_nanbeige4_1_3b_failed.jsonl
     file_pattern: all_data_with_questions_math_unique_queries_high_confidence.parquet
     input_field: question
+    judge_mode: math
     label_field: label
     range_start: 0
     range_end: 1
@@ -131,6 +137,7 @@ tasks:
     failure_log: opencode_reasoning_split_0_failed.jsonl
     file_pattern: "*.parquet"
     input_field: input
+    judge_mode: code
     label_field:
     concurrency: 160
     judge_concurrency: 16
@@ -156,3 +163,41 @@ tasks:
     range_end:
     sample_limit: 50000
     field: general
+
+  - task_name: no_robots_train_sft
+    input_dir: /mnt/hdd/lvzhihao/data/no_robots
+    output_dir: /mnt/hdd/lvzhihao/output/distill/no_robots_train_sft
+    failure_log: no_robots_train_sft_failed.jsonl
+    file_pattern: data/train_sft-*.parquet
+    input_field: messages
+    judge_mode: none
+    complete_trailing_user_turn: true
+    range_start: 0
+    range_end:
+    sample_limit:
+    # Mixed open-ended instruction/chat SFT data. Prefer no hard auto-judge.
+
+  - task_name: tulu_3_personas_instruction_following
+    input_dir: /mnt/hdd/lvzhihao/data/tulu-3-sft-personas-instruction-following
+    output_dir: /mnt/hdd/lvzhihao/output/distill/tulu-3-sft-personas-instruction-following
+    failure_log: tulu_3_personas_instruction_following_failed.jsonl
+    file_pattern: data/train-*.parquet
+    input_field: prompt
+    judge_mode: instruction_following
+    range_start: 0
+    range_end:
+    sample_limit:
+    # Prompt-based SFT data with verifiable constraints in `constraints`.
+
+  - task_name: if_multi_constraints_upto5
+    input_dir: /mnt/hdd/lvzhihao/data/IF_multi_constraints_upto5
+    output_dir: /mnt/hdd/lvzhihao/output/distill/IF_multi_constraints_upto5
+    failure_log: IF_multi_constraints_upto5_failed.jsonl
+    file_pattern: data/train-*.parquet
+    input_field: messages
+    judge_mode: instruction_following
+    complete_trailing_user_turn: true
+    range_start: 0
+    range_end:
+    sample_limit:
+    # User-turn messages plus structured `ground_truth`; generate one final assistant turn.

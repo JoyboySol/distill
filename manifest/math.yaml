@@ -6,7 +6,7 @@ concurrency: 2048
 judge_concurrency: 16
 active_files: 32
 rollout_count: 4
-max_tokens: 16000
+max_tokens: 32000
 batch_size: 1000
 
 segment_size_mb: 1
@@ -33,6 +33,7 @@ tasks:
     failure_log: math_lighteval_failed.jsonl
     file_pattern: "*/train-*.parquet"
     input_field: problem
+    judge_mode: math
     # MATH-lighteval 的 gold answer 在 `solution` 里，最终答案包在 `\\boxed{}` 中。
     # 交给 math_verify 时会直接从 solution 里做 boxed 抽取。
     label_field: solution
@@ -44,6 +45,7 @@ tasks:
     failure_log: openr1_math_220k_failed.jsonl
     file_pattern: "all/*.parquet"
     input_field: problem
+    judge_mode: math
     # 直接走 math_verify。
     label_field: answer
     rollout_count: 4
@@ -54,6 +56,26 @@ tasks:
     failure_log: math_sft_40k_failed.jsonl
     file_pattern: train.jsonl
     input_field: question
+    judge_mode: math
     # 直接走 math_verify。
     label_field: golden_answer
     rollout_count: 4
+
+  - task_name: open_math_instruct2
+    input_dir: /mnt/hdd/lvzhihao/data/OpenMathInstruct-2/data
+    output_dir: /mnt/hdd/lvzhihao/output/OpenMathInstruct-2
+    failure_log: open_math_failed.jsonl
+    file_pattern: train-*.parquet
+    input_field: problem
+    judge_mode: math
+    label_field: expected_answer
+    rollout_count: 4
+
+  - task_name: openthoughts3_math_nanbeige4_1_3b
+    input_dir: /mnt/hdd/lvzhihao/data/OpenThoughts3-1.2M/data
+    output_dir: /mnt/hdd/lvzhihao/output/OpenThoughts3-1.2M-math-distill-nanbeige4_1_3b
+    failure_log: openthoughts3_math_nanbeige4_1_3b_failed.jsonl
+    file_pattern: all_data_with_questions_math_unique_queries_high_confidence.parquet
+    input_field: question
+    judge_mode: math
+    label_field: label

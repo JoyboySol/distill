@@ -19,6 +19,7 @@ tasks:
     failure_log: openthoughts3_math_part1_failed.jsonl
     file_pattern: all_data_with_questions_math_labeled_only.parquet
     input_field: question
+    judge_mode: math
     label_field: label
     range_start: 0
     range_end: 1
@@ -29,6 +30,7 @@ tasks:
     failure_log: openthoughts3_math_part2_failed.jsonl
     file_pattern: all_data_with_questions_math_labeled_only.parquet
     input_field: question
+    judge_mode: math
     label_field: label
     range_start: 0
     range_end: 1

@@ -1,0 +1,59 @@
+# Example manifest for instruction-following oriented datasets.
+# Recommendation:
+# - IF-style verifiable datasets use explicit `judge_mode: instruction_following`
+# - Open-ended chat/instruction corpora like no_robots keep `judge_mode: none`
+
+model: Nanbeige4.1-3B
+ports:
+  - 6758-6765
+
+concurrency: 768
+judge_concurrency: 32
+active_files: 6
+rollout_count: 1
+max_tokens: 12000
+batch_size: 1000
+
+segment_size_mb: 4
+segment_flush_interval_sec: 10
+shard_size_mb: 200
+write_retries: 3
+
+tasks:
+  - task_name: no_robots_train_sft
+    input_dir: /mnt/hdd/lvzhihao/data/no_robots
+    output_dir: /mnt/hdd/lvzhihao/output/distill/no_robots_train_sft
+    failure_log: no_robots_train_sft_failed.jsonl
+    file_pattern: data/train_sft-*.parquet
+    input_field: messages
+    judge_mode: none
+    complete_trailing_user_turn: true
+    range_start: 0
+    range_end:
+    sample_limit:
+    # Mixed open-ended instruction/chat SFT data. Prefer no hard auto-judge.
+
+  - task_name: tulu_3_personas_instruction_following
+    input_dir: /mnt/hdd/lvzhihao/data/tulu-3-sft-personas-instruction-following
+    output_dir: /mnt/hdd/lvzhihao/output/distill/tulu-3-sft-personas-instruction-following
+    failure_log: tulu_3_personas_instruction_following_failed.jsonl
+    file_pattern: data/train-*.parquet
+    input_field: prompt
+    judge_mode: instruction_following
+    range_start: 0
+    range_end:
+    sample_limit:
+    # Prompt-based SFT data with verifiable constraints in `constraints`.
+
+  - task_name: if_multi_constraints_upto5
+    input_dir: /mnt/hdd/lvzhihao/data/IF_multi_constraints_upto5
+    output_dir: /mnt/hdd/lvzhihao/output/distill/IF_multi_constraints_upto5
+    failure_log: IF_multi_constraints_upto5_failed.jsonl
+    file_pattern: data/train-*.parquet
+    input_field: messages
+    judge_mode: instruction_following
+    complete_trailing_user_turn: true
+    range_start: 0
+    range_end:
+    sample_limit:
+    # User-turn messages plus structured `ground_truth`; generate one final assistant turn.

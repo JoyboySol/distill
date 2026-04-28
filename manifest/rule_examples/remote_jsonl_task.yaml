@@ -6,6 +6,7 @@ failure_log: remote_failed_tasks.jsonl
 
 file_pattern: "*.jsonl"
 input_field: prompt
+judge_mode: auto
 label_field: label
 
 model: Qwen3-30B-A3B-Thinking-2507
