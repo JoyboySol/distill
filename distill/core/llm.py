@@ -29,6 +29,10 @@ class NoHealthyBackendsError(RuntimeError):
     pass
 
 
+class StopRequestedError(asyncio.CancelledError):
+    pass
+
+
 @dataclass
 class BackendState:
     base_url: str
@@ -87,10 +91,46 @@ class AsyncLLMManager:
         self.vllm_ls_command = config.vllm_ls_command
         self._inflight_requests = 0
         self._state_cond = asyncio.Condition()
+        self._stop_requested = False
+        self._stop_reason: Optional[str] = None
+        self._shutdown_task: Optional[asyncio.Task] = None
+
+    def request_stop(self, reason: str = "stop_requested"):
+        if self._stop_requested:
+            return
+        self._stop_requested = True
+        self._stop_reason = reason
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._notify_stop_requested())
+        if self._shutdown_task is None or self._shutdown_task.done():
+            self._shutdown_task = loop.create_task(self.close())
+
+    async def _notify_stop_requested(self):
+        async with self._state_cond:
+            self._state_cond.notify_all()
+
+    def _raise_if_stop_requested(self):
+        if self._stop_requested:
+            raise StopRequestedError(self._stop_reason or "stop_requested")
+
+    async def close(self):
+        for backend in self.backends:
+            close = getattr(backend.client, "close", None)
+            if close is None:
+                continue
+            try:
+                await close()
+            except Exception as exc:
+                logger.warning("Failed to close LLM client for %s: %s",
+                               backend.base_url, exc)
 
     async def _acquire_capacity(self):
         async with self._state_cond:
             while True:
+                self._raise_if_stop_requested()
                 active_count = sum(1 for backend in self.backends if backend.active)
                 if active_count == 0:
                     raise NoHealthyBackendsError(
@@ -111,6 +151,7 @@ class AsyncLLMManager:
 
     async def _acquire_backend(self) -> Tuple[int, BackendState]:
         async with self._state_cond:
+            self._raise_if_stop_requested()
             active_indices = [
                 idx for idx, backend in enumerate(self.backends) if backend.active
             ]
@@ -251,9 +292,11 @@ class AsyncLLMManager:
         return False
 
     async def _retry_sleep(self, attempt: int):
+        self._raise_if_stop_requested()
         delay = min(max(2**attempt, 2), 10)
         logger.warning("Retrying LLM request in %ss", delay)
         await asyncio.sleep(delay)
+        self._raise_if_stop_requested()
 
     async def _chat_completion_create(self, backend: BackendState,
                                       messages: List[Dict[str, Any]]):
@@ -296,11 +339,14 @@ class AsyncLLMManager:
         max_attempts = 5
 
         for attempt in range(1, max_attempts + 1):
+            self._raise_if_stop_requested()
             backend_idx: Optional[int] = None
 
             await self._acquire_capacity()
             try:
+                self._raise_if_stop_requested()
                 backend_idx, backend = await self._acquire_backend()
+                self._raise_if_stop_requested()
                 try:
                     response = await self._chat_completion_create(
                         backend, messages)
@@ -312,6 +358,7 @@ class AsyncLLMManager:
                         type(exc).__name__,
                         exc,
                     )
+                    self._raise_if_stop_requested()
                     backend_present = await self._backend_process_present(
                         backend.base_url)
                     if backend_present is False:
@@ -349,6 +396,7 @@ class AsyncLLMManager:
                         type(exc).__name__,
                         exc,
                     )
+                    self._raise_if_stop_requested()
                     if attempt < max_attempts:
                         await self._retry_sleep(attempt)
                         continue

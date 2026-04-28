@@ -276,6 +276,7 @@ class DistillPipeline:
             return
         self.stop_requested = True
         self.interrupt_finalize_requested = True
+        self.llm_manager.request_stop(signame)
         logger.warning(
             "Received %s, cancelling in-flight work and finalizing persisted outputs...",
             signame,

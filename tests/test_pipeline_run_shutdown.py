@@ -154,6 +154,7 @@ class PipelineRunShutdownTests(unittest.TestCase):
 
             self.assertTrue(summary["interrupted"])
             self.assertTrue(cancelled.is_set())
+            self.assertTrue(pipeline.llm_manager._stop_requested)
             pipeline._upload_pending_correct_shards.assert_awaited_once()
             self.assertTrue((output_dir / "all" / "judge_stats.json").exists())
             self.assertTrue((output_dir / "correct" / "judge_stats.json").exists())

@@ -108,6 +108,7 @@ class AsyncLLMManagerTests(unittest.IsolatedAsyncioTestCase):
             model_name="test-model",
             api_key="EMPTY",
             base_urls=["http://127.0.0.1:20001/v1"],
+            vllm_ls_command=None,
             max_concurrency=1,
         )
         manager = AsyncLLMManager(config)
@@ -315,6 +316,49 @@ class AsyncLLMManagerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(manager.backends[0].active)
         self.assertFalse(manager.backends[1].active)
+
+    async def test_generate_stops_retrying_after_stop_requested(self):
+        config = PipelineConfig(
+            input_dir="in",
+            output_dir="out",
+            failure_log="failure.jsonl",
+            model_name="test-model",
+            api_key="EMPTY",
+            base_urls=["http://127.0.0.1:20001/v1"],
+            vllm_ls_command=None,
+            max_concurrency=1,
+        )
+        manager = AsyncLLMManager(config)
+
+        failed_calls = 0
+
+        async def fail_and_stop(**kwargs):
+            nonlocal failed_calls
+            failed_calls += 1
+            manager.request_stop("SIGINT")
+            raise APIConnectionError(
+                message="backend down during shutdown",
+                request=httpx.Request(
+                    "POST",
+                    "http://127.0.0.1:20001/v1/chat/completions",
+                ),
+            )
+
+        async def no_sleep(attempt: int):
+            return None
+
+        manager.backends = [
+            BackendState(
+                base_url="http://127.0.0.1:20001/v1",
+                client=_FakeClient(fail_and_stop),
+            ),
+        ]
+        manager._retry_sleep = no_sleep
+
+        with self.assertRaises(asyncio.CancelledError):
+            await manager.generate("hello")
+
+        self.assertEqual(failed_calls, 1)
 
 
 class PipelineFatalBackendOutageTests(unittest.IsolatedAsyncioTestCase):
