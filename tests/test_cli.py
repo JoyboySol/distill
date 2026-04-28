@@ -120,6 +120,13 @@ class RootCliTests(unittest.TestCase):
 
         self.assertEqual(args.command, "stats")
 
+    def test_build_root_parser_accepts_profile_manifest_inputs_subcommand(self):
+        parser = root_cli.build_root_parser()
+        args = parser.parse_args(
+            ["profile-manifest-inputs", "--config", "/tmp/task.yaml"])
+
+        self.assertEqual(args.command, "profile-manifest-inputs")
+
     def test_build_root_parser_accepts_download_subcommand(self):
         parser = root_cli.build_root_parser()
         args = parser.parse_args(["download", "--repo-id", "org/repo"])

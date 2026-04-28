@@ -6,6 +6,7 @@ from typing import Callable, Optional, Sequence
 from .commands import (avg_correct_tokens, download, eval_existing_outputs,
                        hydrate_opencode_reasoning_split1,
                        manifest_token_stats, merge_correct_segments,
+                       profile_manifest_inputs,
                        prepare_opencode_reasoning,
                        rebuild_correct_segments, rejudge_saved_outputs,
                        rewrite_completed_index_paths, run, stats)
@@ -63,6 +64,12 @@ COMMAND_SPECS = (
         help_text="Summarize per-task token stats from a manifest.",
         build_parser=manifest_token_stats.build_parser,
         handler=manifest_token_stats.run_namespace,
+    ),
+    CommandSpec(
+        name="profile-manifest-inputs",
+        help_text="Profile raw manifest-backed input datasets.",
+        build_parser=profile_manifest_inputs.build_parser,
+        handler=profile_manifest_inputs.run_namespace,
     ),
     CommandSpec(
         name="merge-correct-segments",
