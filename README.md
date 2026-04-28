@@ -197,6 +197,37 @@
 
 - `judge_detail.verify_fallback_reason`
 
+### 5.3 Instruction-Following 判题
+
+当前新增了一个面向“可验证约束遵循”数据的 judge：
+
+- `judge_type = instruction_following`
+- `judge_backend = instruction_following_v1`
+
+它主要面向两类数据：
+
+- 带 `ground_truth` 约束元数据的 IF / IFEval 风格样本
+- 带 `constraints + prompt` 的 Tulu persona instruction-following 样本
+
+当前版本只对“能够高置信完整验证”的约束组合给出结论，例如：
+
+- `last_word / first_word`
+- `include/exclude keywords`
+- `repeat prompt / repeat phrase / copy span`
+- `specific ending`
+- `punctuation` 禁用
+- `sentence_hyphens`
+- `number of paragraphs`
+- `placeholder count`
+- `title / quotation / bullet-list count`
+
+如果样本里包含当前还不支持的约束，或者只能验证其中一部分，系统会保守返回：
+
+- `is_correct = None`
+- `judge_status = not_applicable`
+
+这样可以避免把“部分可验证”的 instruction-following 样本误判成正确。
+
 ## 6. 断点续跑
 
 断点续跑有两层保护：
@@ -437,8 +468,16 @@ CLI 参数会覆盖 YAML 里的同名字段，所以你可以这样临时改：
 
 - `sample_limit` 表示在 `range_start / range_end` 选出的文件范围内，最多只蒸馏前 N 条输入样本
 - 它是在 `rollout_count` 展开之前生效的，所以最终最多会产生 `sample_limit * rollout_count` 个 generation task
-- `judge_mode = auto | none`
-- `judge_mode = none` 时会完全跳过 judge 启发式和执行逻辑，统一落成 `judge_type = none`
+- `judge_mode` 现在既可以是总开关，也可以是显式 judge 路由策略
+- `judge_mode = auto`
+  使用内置默认顺序自动判题：`code -> instruction_following -> mcq -> math`
+- `judge_mode = none`
+  完全跳过 judge 启发式和执行逻辑，统一落成 `judge_type = none`
+- `judge_mode = code | instruction_following | mcq | math`
+  只允许这一类 judge 参与，禁止其他 family fallback
+- `judge_mode = instruction_following,mcq`
+  这种逗号分隔写法表示显式优先级列表，按你写的顺序依次尝试
+- `judge_mode` 里不能把 `auto` 或 `none` 和其他 family 混写；非法值会在配置构建阶段直接报错
 - `complete_trailing_user_turn = true` 时，如果 multi-turn 输入最后停在 `user`，流水线会再补生成一轮 assistant 收尾
 - `task_schedule = serial | round_robin`
 - `round_robin_chunk_size` 只在 `round_robin` 下生效，表示每轮每个 task 把累计 `sample_limit` 往前推进多少条

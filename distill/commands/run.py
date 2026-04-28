@@ -6,6 +6,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from ..common.judge_mode import normalize_judge_mode
 from ..runtime.manifest import (DEFAULT_MANIFEST_DIRNAME,
                                 DEFAULT_RULE_EXAMPLES_DIRNAME,
                                 list_task_configs, load_manifest_tasks,
@@ -207,7 +208,9 @@ def build_parser(add_help: bool = True) -> argparse.ArgumentParser:
         parser,
         "--judge-mode",
         type=str,
-        help="Judge mode: auto or none.",
+        help=("Judge mode: auto, none, a single family "
+              "(code|instruction_following|mcq|math), or a comma-separated "
+              "ordered list such as 'instruction_following,mcq'."),
     )
     _add_argument(
         parser,
@@ -404,6 +407,8 @@ def _build_config_from_values(values: Dict[str, Any]) -> PipelineConfig:
         direct_urls=values["base_urls"],
         ports_text=values["ports"],
     )
+    normalized_judge_mode = normalize_judge_mode(values.get("judge_mode",
+                                                            "auto"))
 
     return PipelineConfig(
         input_dir=values["input_dir"],
@@ -430,7 +435,7 @@ def _build_config_from_values(values: Dict[str, Any]) -> PipelineConfig:
         range_start=values["range_start"],
         range_end=values["range_end"],
         sample_limit=values["sample_limit"],
-        judge_mode=str(values.get("judge_mode", "auto") or "auto"),
+        judge_mode=normalized_judge_mode,
         complete_trailing_user_turn=bool(values.get(
             "complete_trailing_user_turn", False)),
         input_content_field=values["input_field"],

@@ -14,12 +14,15 @@ def iter_rows(input_dir: Path, limit: int, batch_size: int = 128):
     seen = 0
     for parquet_path in sorted(input_dir.glob("*.parquet")):
         parquet_file = pq.ParquetFile(parquet_path)
-        available_columns = set(parquet_file.schema.names)
+        available_columns = set(parquet_file.schema_arrow.names)
         preferred_columns = [
             "id",
             "input",
             "output",
             "solution",
+            "ground_truth",
+            "constraints",
+            "dataset",
             "input_output",
             "evaluation_sample",
             "public_test_cases",

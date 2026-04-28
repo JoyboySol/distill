@@ -15,6 +15,7 @@ from openai import APITimeoutError, BadRequestError
 from tqdm.asyncio import tqdm
 
 try:
+    from ..common.judge_mode import judge_mode_disables_all, normalize_judge_mode
     from ..runtime.settings import PipelineConfig, logger
     from ..common.utils import ensure_message_shape, safe_json_dumps
     from .failure import FailureRecorder
@@ -22,6 +23,7 @@ try:
     from .llm import (AsyncLLMManager, GenerationResponse,
                       NoHealthyBackendsError)
 except ImportError:
+    from common.judge_mode import judge_mode_disables_all, normalize_judge_mode
     from runtime.settings import PipelineConfig, logger
     from common.utils import ensure_message_shape, safe_json_dumps
     from core.failure import FailureRecorder
@@ -1389,9 +1391,9 @@ class DistillPipeline:
     ) -> Dict[str, Any]:
         messages = [ensure_message_shape(message) for message in messages]
         dataset_name = self._dataset_name(task.row_data, task.source_file)
-        judge_mode = str(getattr(self.config, "judge_mode", "auto")
-                         or "auto").lower()
-        if judge_mode == "none":
+        judge_mode = normalize_judge_mode(getattr(self.config, "judge_mode",
+                                                  "auto"))
+        if judge_mode_disables_all(judge_mode):
             judge_result = {
                 "judge_type": None,
                 "judge_backend": None,
@@ -1404,12 +1406,14 @@ class DistillPipeline:
                 task.row_data,
                 messages,
                 label_field=self.config.label_field,
+                judge_mode=judge_mode,
             )
         else:
             judge_result = judge_output_with_timeout(
                 task.row_data,
                 messages,
                 label_field=self.config.label_field,
+                judge_mode=judge_mode,
                 timeout=self.config.judge_timeout_sec,
             )
         if judge_result.get("judge_type") is None:

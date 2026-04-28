@@ -84,6 +84,27 @@ class CliConfigTests(unittest.TestCase):
             self.assertTrue(config.upload_merged_shards)
             self.assertEqual(config.judge_mode, "none")
 
+    def test_build_config_accepts_explicit_judge_route_list(self):
+        values = dict(DEFAULT_PIPELINE_VALUES)
+        values.update({
+            "ports": "1597",
+            "judge_mode": "instruction_following,mcq",
+        })
+
+        config = _build_config_from_values(values)
+
+        self.assertEqual(config.judge_mode, "instruction_following,mcq")
+
+    def test_build_config_rejects_unknown_judge_mode(self):
+        values = dict(DEFAULT_PIPELINE_VALUES)
+        values.update({
+            "ports": "1597",
+            "judge_mode": "instruction_following,unknown_mode",
+        })
+
+        with self.assertRaises(ValueError):
+            _build_config_from_values(values)
+
 
 class RootCliTests(unittest.TestCase):
 

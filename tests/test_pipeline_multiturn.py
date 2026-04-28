@@ -508,6 +508,55 @@ class MultiTurnPipelineTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(record["is_correct"])
             self.assertEqual(record["judge_status"], "not_applicable_overlong")
 
+    def test_build_output_record_passes_explicit_judge_mode_to_single_turn_judge(
+            self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = self._build_pipeline(tmpdir)
+            pipeline.config.judge_mode = "instruction_following"
+            task = TaskItem(
+                source_file="/tmp/input.jsonl",
+                source_row=9,
+                rollout_index=0,
+                row_data={"ground_truth": "[]"},
+                prompt="Prompt",
+                task_mode="single_turn",
+            )
+            messages = [
+                {
+                    "role": "user",
+                    "content": "Prompt",
+                },
+                {
+                    "role": "assistant",
+                    "content": "Answer",
+                },
+            ]
+
+            with patch("distill.core.pipeline.judge_output_with_timeout",
+                       return_value={
+                           "judge_type": "instruction_following",
+                           "judge_backend": "instruction_following_v1",
+                           "is_correct": True,
+                           "judge_status": "pass",
+                           "judge_detail": {},
+                       }) as mock_judge:
+                record = pipeline._build_output_record(
+                    task,
+                    messages,
+                    finish_reason="stop",
+                    usage={},
+                    distill_status="success",
+                    distill_error=None,
+                    assistant_turns_completed=1,
+                    assistant_turns_total=1,
+                )
+
+            self.assertEqual(record["judge_type"], "instruction_following")
+            self.assertEqual(
+                mock_judge.call_args.kwargs["judge_mode"],
+                "instruction_following",
+            )
+
     def test_prepare_task_input_detects_serialized_multiturn_messages(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             pipeline = self._build_pipeline(tmpdir)
