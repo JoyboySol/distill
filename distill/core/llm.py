@@ -37,6 +37,7 @@ class StopRequestedError(asyncio.CancelledError):
 class BackendState:
     base_url: str
     client: AsyncOpenAI
+    api_key_index: int = 0
     active: bool = True
     pending_count: int = 0
 
@@ -74,18 +75,27 @@ class AsyncLLMManager:
         self.base_urls = list(config.base_urls)
         if not self.base_urls:
             raise ValueError("AsyncLLMManager requires at least one base URL.")
-        self.backends = [
-            BackendState(
-                base_url=url,
-                client=AsyncOpenAI(
-                    api_key=config.api_key,
-                    base_url=url,
-                    max_retries=0,
-                    http_client=httpx.AsyncClient(
-                        trust_env=not _is_loopback_base_url(url)),
-                ),
-            ) for url in self.base_urls
-        ]
+        self.api_keys = list(config.api_keys or [])
+        if not self.api_keys:
+            self.api_keys = [config.api_key]
+        self.api_key_concurrency = int(config.api_key_concurrency or 0)
+        if self.api_key_concurrency < 0:
+            raise ValueError("api_key_concurrency must be >= 0")
+        self.backends = []
+        for url in self.base_urls:
+            for api_key_index, api_key in enumerate(self.api_keys):
+                self.backends.append(
+                    BackendState(
+                        base_url=url,
+                        api_key_index=api_key_index,
+                        client=AsyncOpenAI(
+                            api_key=api_key,
+                            base_url=url,
+                            max_retries=0,
+                            http_client=httpx.AsyncClient(
+                                trust_env=not _is_loopback_base_url(url)),
+                        ),
+                    ))
         self.max_concurrency = config.max_concurrency
         self.total_backends = len(self.backends)
         self.vllm_ls_command = config.vllm_ls_command
@@ -151,18 +161,32 @@ class AsyncLLMManager:
 
     async def _acquire_backend(self) -> Tuple[int, BackendState]:
         async with self._state_cond:
-            self._raise_if_stop_requested()
-            active_indices = [
-                idx for idx, backend in enumerate(self.backends) if backend.active
-            ]
-            if not active_indices:
-                raise NoHealthyBackendsError(
-                    "No healthy LLM backends remain available.")
-            backend_idx = min(active_indices,
-                              key=lambda idx: self.backends[idx].pending_count)
-            backend = self.backends[backend_idx]
-            backend.pending_count += 1
-            return backend_idx, backend
+            while True:
+                self._raise_if_stop_requested()
+                active_indices = [
+                    idx for idx, backend in enumerate(self.backends)
+                    if backend.active
+                ]
+                if not active_indices:
+                    raise NoHealthyBackendsError(
+                        "No healthy LLM backends remain available.")
+                eligible_indices = [
+                    idx for idx in active_indices
+                    if self._api_key_has_capacity(self.backends[idx].api_key_index)
+                ]
+                if eligible_indices:
+                    backend_idx = min(
+                        eligible_indices,
+                        key=lambda idx: (
+                            self._api_key_pending_count(
+                                self.backends[idx].api_key_index),
+                            self.backends[idx].pending_count,
+                        ),
+                    )
+                    backend = self.backends[backend_idx]
+                    backend.pending_count += 1
+                    return backend_idx, backend
+                await self._state_cond.wait()
 
     async def _release_backend(self, backend_idx: int):
         async with self._state_cond:
@@ -170,6 +194,15 @@ class AsyncLLMManager:
             if backend.pending_count > 0:
                 backend.pending_count -= 1
             self._state_cond.notify_all()
+
+    def _api_key_pending_count(self, api_key_index: int) -> int:
+        return sum(backend.pending_count for backend in self.backends
+                   if backend.api_key_index == api_key_index)
+
+    def _api_key_has_capacity(self, api_key_index: int) -> bool:
+        if self.api_key_concurrency <= 0:
+            return True
+        return self._api_key_pending_count(api_key_index) < self.api_key_concurrency
 
     async def _mark_backend_unhealthy(self, backend_idx: int,
                                       exc: Exception) -> int:

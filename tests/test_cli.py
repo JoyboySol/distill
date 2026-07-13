@@ -37,6 +37,8 @@ class CliConfigTests(unittest.TestCase):
             "treat_no_judge_as_correct": True,
             "hf_repo_id": "JoyboyGo/hf_data",
             "hf_remote_prefix": "distill",
+            "api_keys": ["key-a,key-b"],
+            "api_key_concurrency": 3,
         })
 
         config = _build_config_from_values(values)
@@ -55,6 +57,8 @@ class CliConfigTests(unittest.TestCase):
         self.assertTrue(config.treat_no_judge_as_correct)
         self.assertEqual(config.hf_repo_id, "JoyboyGo/hf_data")
         self.assertEqual(config.hf_remote_prefix, "distill")
+        self.assertEqual(config.api_keys, ["key-a", "key-b"])
+        self.assertEqual(config.api_key_concurrency, 3)
         self.assertEqual(config.base_urls, [
             "http://127.0.0.1:1597/v1",
             "http://127.0.0.1:1598/v1",

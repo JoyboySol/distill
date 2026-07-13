@@ -133,6 +133,50 @@ class AsyncLLMManagerTests(unittest.IsolatedAsyncioTestCase):
             "content": "hello",
         }])
 
+    async def test_acquire_backend_respects_per_api_key_concurrency(self):
+        config = PipelineConfig(
+            input_dir="in",
+            output_dir="out",
+            failure_log="failure.jsonl",
+            model_name="test-model",
+            api_key="fallback",
+            api_keys=["key-a", "key-b"],
+            api_key_concurrency=1,
+            base_urls=["http://127.0.0.1:20001/v1"],
+            vllm_ls_command=None,
+            max_concurrency=4,
+        )
+        manager = AsyncLLMManager(config)
+        manager.backends = [
+            BackendState(
+                base_url="http://127.0.0.1:20001/v1",
+                client=_FakeClient(lambda **kwargs: None),
+                api_key_index=0,
+            ),
+            BackendState(
+                base_url="http://127.0.0.1:20001/v1",
+                client=_FakeClient(lambda **kwargs: None),
+                api_key_index=1,
+            ),
+        ]
+
+        first_idx, first_backend = await manager._acquire_backend()
+        second_idx, second_backend = await manager._acquire_backend()
+        blocked_task = asyncio.create_task(manager._acquire_backend())
+        await asyncio.sleep(0)
+
+        self.assertEqual(first_backend.api_key_index, 0)
+        self.assertEqual(second_backend.api_key_index, 1)
+        self.assertFalse(blocked_task.done())
+
+        await manager._release_backend(first_idx)
+        third_idx, third_backend = await blocked_task
+
+        self.assertEqual(third_backend.api_key_index, 0)
+
+        await manager._release_backend(second_idx)
+        await manager._release_backend(third_idx)
+
     async def test_generate_stops_using_backend_only_when_vllm_ls_confirms_absent(
             self):
         config = PipelineConfig(

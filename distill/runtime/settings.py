@@ -101,6 +101,8 @@ class PipelineConfig:
     model_name: str
     api_key: Optional[str]
     base_urls: List[str]
+    api_keys: Optional[List[str]] = None
+    api_key_concurrency: int = 0
     vllm_ls_command: Optional[str] = DEFAULT_VLLM_LS_COMMAND
     task_name: Optional[str] = None
     config_path: Optional[str] = None

@@ -15,7 +15,7 @@ from ..runtime.manifest import (DEFAULT_MANIFEST_DIRNAME,
                                 select_manifest_tasks)
 from ..runtime.settings import (DEFAULT_LLM_TIMEOUT,
                                 DEFAULT_VLLM_LS_COMMAND, PipelineConfig,
-                                logger, resolve_base_urls)
+                                logger, resolve_base_urls, split_text_items)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -31,6 +31,8 @@ DEFAULT_PIPELINE_VALUES: Dict[str, Any] = {
     "complete_trailing_user_turn": False,
     "model": "Qwen3-30B-A3B-Thinking-2507",
     "api_key": os.getenv("OPENAI_API_KEY", "EMPTY"),
+    "api_keys": None,
+    "api_key_concurrency": 0,
     "vllm_ls_command": DEFAULT_VLLM_LS_COMMAND,
     "base_urls": None,
     "ports": None,
@@ -71,6 +73,8 @@ CONFIG_KEY_ALIASES = {
     "judge-mode": "judge_mode",
     "complete-trailing-user-turn": "complete_trailing_user_turn",
     "api-key": "api_key",
+    "api-keys": "api_keys",
+    "api-key-concurrency": "api_key_concurrency",
     "judge-concurrency": "judge_concurrency",
     "judge-timeout-sec": "judge_timeout_sec",
     "active-files": "active_files",
@@ -123,6 +127,23 @@ def _resolve_optional_env_text(raw: Any) -> Any:
         resolved = os.getenv(text[1:], "")
         return resolved or None
     return raw
+
+
+def _resolve_optional_env_items(raw: Any) -> List[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, (list, tuple, set)):
+        items: List[str] = []
+        for item in raw:
+            resolved = _resolve_optional_env_text(item)
+            if resolved is None:
+                continue
+            items.extend(_resolve_optional_env_items(resolved))
+        return items
+    resolved = _resolve_optional_env_text(raw)
+    if resolved is None:
+        return []
+    return [item for item in split_text_items(resolved) if item]
 
 
 def build_parser(add_help: bool = True) -> argparse.ArgumentParser:
@@ -228,6 +249,20 @@ def build_parser(add_help: bool = True) -> argparse.ArgumentParser:
         "--api-key",
         type=str,
         help="API key for the OpenAI-compatible backend.",
+    )
+    _add_argument(
+        parser,
+        "--api-keys",
+        nargs="+",
+        help=("Multiple API keys for the OpenAI-compatible backend. Values may "
+              "also be comma/newline separated."),
+    )
+    _add_argument(
+        parser,
+        "--api-key-concurrency",
+        type=int,
+        help=("Maximum in-flight requests per API key. 0 means unlimited except "
+              "for the global concurrency limit."),
     )
     _add_argument(
         parser,
@@ -419,6 +454,8 @@ def _build_config_from_values(values: Dict[str, Any]) -> PipelineConfig:
         model_name=values["model"],
         api_key=values["api_key"],
         base_urls=base_urls,
+        api_keys=_resolve_optional_env_items(values.get("api_keys")),
+        api_key_concurrency=int(values.get("api_key_concurrency", 0) or 0),
         vllm_ls_command=values.get("vllm_ls_command"),
         task_name=values.get("task_name"),
         config_path=values.get("config_path"),
