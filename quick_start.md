@@ -1,3 +1,28 @@
+# distill
+
+## YuLan Math 一站式启动
+
+`manifest/post_train/yulan_math.yaml` 已经包含 `serve:` 配置，可以直接启动
+vLLM 服务并运行蒸馏：
+
+```bash
+cd /mnt/ssd/lvzhihao/PostTrain/distill
+bash run.sh --config manifest/post_train/yulan_math.yaml
+```
+
+小规模试跑：
+
+```bash
+cd /mnt/ssd/lvzhihao/PostTrain/distill
+bash run.sh --config manifest/post_train/yulan_math.yaml -- --sample-limit 10
+```
+
+命令行参数和环境变量会覆盖 manifest 里的 `serve:` 配置，例如：
+
+```bash
+bash run.sh --config manifest/post_train/yulan_math.yaml --gpus "0 1 2 3 4 5 6 7"
+```
+
 # serve
 
 ## 8 卡

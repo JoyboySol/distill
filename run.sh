@@ -28,12 +28,54 @@ DEFAULT_VLLM_LS_COMMAND="${DISTILL_VLLM_LS_COMMAND:-${VLLM_LS_BIN:-/mnt/ssd/yula
 
 PYTHON_BIN_EXPLICIT=0
 VLLM_BIN_EXPLICIT=0
+BASE_PORT_EXPLICIT=0
+PORTS_SPEC_EXPLICIT=0
+RANDOMIZE_PORTS_EXPLICIT=0
+PORT_RANGE_START_EXPLICIT=0
+PORT_RANGE_END_EXPLICIT=0
+MODEL_PATH_EXPLICIT=0
+CACHE_ROOT_EXPLICIT=0
+GPUS_STR_EXPLICIT=0
+MODEL_NAME_EXPLICIT=0
+MAX_MODEL_LEN_EXPLICIT=0
+GPU_MEMORY_UTILIZATION_EXPLICIT=0
+TENSOR_PARALLEL_SIZE_EXPLICIT=0
+REASONING_PARSER_EXPLICIT=0
+WAIT_TIMEOUT_SEC_EXPLICIT=0
+HEALTH_CHECK_INTERVAL_SEC_EXPLICIT=0
+API_KEY_EXPLICIT=0
+LLM_TIMEOUT_EXPLICIT=0
+VLLM_LS_COMMAND_EXPLICIT=0
+SKIP_SERVE_EXPLICIT=0
+KEEP_SERVERS_EXPLICIT=0
+SERVE_EXTRA_ARGS_EXPLICIT=0
 if [[ -n "${PYTHON_BIN+x}" ]]; then
     PYTHON_BIN_EXPLICIT=1
 fi
 if [[ -n "${VLLM_BIN+x}" ]]; then
     VLLM_BIN_EXPLICIT=1
 fi
+if [[ -n "${BASE_PORT+x}" ]]; then BASE_PORT_EXPLICIT=1; fi
+if [[ -n "${PORTS_SPEC+x}" ]]; then PORTS_SPEC_EXPLICIT=1; fi
+if [[ -n "${RANDOMIZE_PORTS+x}" ]]; then RANDOMIZE_PORTS_EXPLICIT=1; fi
+if [[ -n "${PORT_RANGE_START+x}" ]]; then PORT_RANGE_START_EXPLICIT=1; fi
+if [[ -n "${PORT_RANGE_END+x}" ]]; then PORT_RANGE_END_EXPLICIT=1; fi
+if [[ -n "${MODEL_PATH+x}" ]]; then MODEL_PATH_EXPLICIT=1; fi
+if [[ -n "${CACHE_ROOT+x}" ]]; then CACHE_ROOT_EXPLICIT=1; fi
+if [[ -n "${GPUS_STR+x}" ]]; then GPUS_STR_EXPLICIT=1; fi
+if [[ -n "${MODEL_NAME+x}" ]]; then MODEL_NAME_EXPLICIT=1; fi
+if [[ -n "${MAX_MODEL_LEN+x}" ]]; then MAX_MODEL_LEN_EXPLICIT=1; fi
+if [[ -n "${GPU_MEMORY_UTILIZATION+x}" ]]; then GPU_MEMORY_UTILIZATION_EXPLICIT=1; fi
+if [[ -n "${TENSOR_PARALLEL_SIZE+x}" ]]; then TENSOR_PARALLEL_SIZE_EXPLICIT=1; fi
+if [[ -n "${REASONING_PARSER+x}" ]]; then REASONING_PARSER_EXPLICIT=1; fi
+if [[ -n "${WAIT_TIMEOUT_SEC+x}" ]]; then WAIT_TIMEOUT_SEC_EXPLICIT=1; fi
+if [[ -n "${HEALTH_CHECK_INTERVAL_SEC+x}" ]]; then HEALTH_CHECK_INTERVAL_SEC_EXPLICIT=1; fi
+if [[ -n "${API_KEY+x}" ]]; then API_KEY_EXPLICIT=1; fi
+if [[ -n "${LLM_TIMEOUT+x}" ]]; then LLM_TIMEOUT_EXPLICIT=1; fi
+if [[ -n "${VLLM_LS_COMMAND+x}" ]]; then VLLM_LS_COMMAND_EXPLICIT=1; fi
+if [[ -n "${SKIP_SERVE+x}" ]]; then SKIP_SERVE_EXPLICIT=1; fi
+if [[ -n "${KEEP_SERVERS+x}" ]]; then KEEP_SERVERS_EXPLICIT=1; fi
+if [[ -n "${SERVE_EXTRA_ARGS+x}" ]]; then SERVE_EXTRA_ARGS_EXPLICIT=1; fi
 
 VENV_DIR="${VENV_DIR:-$DEFAULT_VENV_DIR}"
 PYTHON_BIN="${PYTHON_BIN:-$DEFAULT_PYTHON_BIN}"
@@ -82,6 +124,7 @@ One-command workflow:
 
 Options:
   --config PATH                     Manifest YAML to run (default: $CONFIG_PATH)
+                                     run.sh also reads optional top-level serve: settings from this YAML
   --task NAME                       Optional task_name inside the manifest
   --base-port PORT                  Base port when deriving ports from GPUs if random ports are disabled (default: $BASE_PORT)
   --ports SPEC                      Explicit ports, e.g. 1597-1602 or 1597,1599,1601
@@ -133,6 +176,16 @@ Key=value forms:
   llm_timeout=3600
   vllm_ls_command='ps -eo args='
 
+Manifest serve: settings:
+  serve:
+    model_path: /mnt/hdd/Nanbeige4.1-3B
+    model_name: Nanbeige4.1-3B
+    max_model_len: 65536
+    gpus: "0 1 2 3 4 5"
+
+  Supported serve keys mirror the key=value forms above. Explicit CLI arguments
+  and environment variables override manifest serve: values.
+
 Forwarding extra args to distill:
   $SCRIPT_NAME --task opencode_reasoning_split_0 -- --range-start 0 --range-end 10
 
@@ -166,57 +219,75 @@ set_config_value() {
             ;;
         base_port|BASE_PORT)
             BASE_PORT="$value"
+            BASE_PORT_EXPLICIT=1
             ;;
         ports|PORTS_SPEC)
             PORTS_SPEC="$value"
+            PORTS_SPEC_EXPLICIT=1
             ;;
         randomize_ports|RANDOMIZE_PORTS)
             RANDOMIZE_PORTS="$value"
+            RANDOMIZE_PORTS_EXPLICIT=1
             ;;
         port_range_start|PORT_RANGE_START)
             PORT_RANGE_START="$value"
+            PORT_RANGE_START_EXPLICIT=1
             ;;
         port_range_end|PORT_RANGE_END)
             PORT_RANGE_END="$value"
+            PORT_RANGE_END_EXPLICIT=1
             ;;
         model_path|MODEL_PATH)
             MODEL_PATH="$value"
+            MODEL_PATH_EXPLICIT=1
             ;;
         cache_root|CACHE_ROOT)
             CACHE_ROOT="$value"
+            CACHE_ROOT_EXPLICIT=1
             ;;
         gpus|GPUS_STR)
             GPUS_STR="$value"
+            GPUS_STR_EXPLICIT=1
             ;;
         model_name|MODEL_NAME)
             MODEL_NAME="$value"
+            MODEL_NAME_EXPLICIT=1
             ;;
         max_model_len|MAX_MODEL_LEN)
             MAX_MODEL_LEN="$value"
+            MAX_MODEL_LEN_EXPLICIT=1
             ;;
         gpu_memory_utilization|GPU_MEMORY_UTILIZATION)
             GPU_MEMORY_UTILIZATION="$value"
+            GPU_MEMORY_UTILIZATION_EXPLICIT=1
             ;;
         tensor_parallel_size|TENSOR_PARALLEL_SIZE)
             TENSOR_PARALLEL_SIZE="$value"
+            TENSOR_PARALLEL_SIZE_EXPLICIT=1
             ;;
         reasoning_parser|REASONING_PARSER)
             REASONING_PARSER="$value"
+            REASONING_PARSER_EXPLICIT=1
             ;;
         wait_timeout_sec|WAIT_TIMEOUT_SEC)
             WAIT_TIMEOUT_SEC="$value"
+            WAIT_TIMEOUT_SEC_EXPLICIT=1
             ;;
         health_check_interval_sec|HEALTH_CHECK_INTERVAL_SEC)
             HEALTH_CHECK_INTERVAL_SEC="$value"
+            HEALTH_CHECK_INTERVAL_SEC_EXPLICIT=1
             ;;
         api_key|API_KEY)
             API_KEY="$value"
+            API_KEY_EXPLICIT=1
             ;;
         llm_timeout|LLM_TIMEOUT)
             LLM_TIMEOUT="$value"
+            LLM_TIMEOUT_EXPLICIT=1
             ;;
         vllm_ls_command|VLLM_LS_COMMAND)
             VLLM_LS_COMMAND="$value"
+            VLLM_LS_COMMAND_EXPLICIT=1
             ;;
         venv|VENV_DIR)
             VENV_DIR="$value"
@@ -231,12 +302,15 @@ set_config_value() {
             ;;
         skip_serve|SKIP_SERVE)
             SKIP_SERVE="$value"
+            SKIP_SERVE_EXPLICIT=1
             ;;
         keep_servers|KEEP_SERVERS)
             KEEP_SERVERS="$value"
+            KEEP_SERVERS_EXPLICIT=1
             ;;
         serve_extra_args|SERVE_EXTRA_ARGS)
             SERVE_EXTRA_ARGS="$value"
+            SERVE_EXTRA_ARGS_EXPLICIT=1
             ;;
         *)
             die "Unknown argument key: $key"
@@ -257,82 +331,102 @@ parse_args() {
                 ;;
             --base-port)
                 BASE_PORT="$2"
+                BASE_PORT_EXPLICIT=1
                 shift 2
                 ;;
             --ports)
                 PORTS_SPEC="$2"
+                PORTS_SPEC_EXPLICIT=1
                 shift 2
                 ;;
             --randomize-ports)
                 RANDOMIZE_PORTS=1
+                RANDOMIZE_PORTS_EXPLICIT=1
                 shift
                 ;;
             --no-randomize-ports)
                 RANDOMIZE_PORTS=0
+                RANDOMIZE_PORTS_EXPLICIT=1
                 shift
                 ;;
             --port-range-start)
                 PORT_RANGE_START="$2"
+                PORT_RANGE_START_EXPLICIT=1
                 shift 2
                 ;;
             --port-range-end)
                 PORT_RANGE_END="$2"
+                PORT_RANGE_END_EXPLICIT=1
                 shift 2
                 ;;
             --model-path)
                 MODEL_PATH="$2"
+                MODEL_PATH_EXPLICIT=1
                 shift 2
                 ;;
             --cache-root)
                 CACHE_ROOT="$2"
+                CACHE_ROOT_EXPLICIT=1
                 shift 2
                 ;;
             --gpus)
                 GPUS_STR="$2"
+                GPUS_STR_EXPLICIT=1
                 shift 2
                 ;;
             --model-name)
                 MODEL_NAME="$2"
+                MODEL_NAME_EXPLICIT=1
                 shift 2
                 ;;
             --max-model-len)
                 MAX_MODEL_LEN="$2"
+                MAX_MODEL_LEN_EXPLICIT=1
                 shift 2
                 ;;
             --gpu-memory-utilization)
                 GPU_MEMORY_UTILIZATION="$2"
+                GPU_MEMORY_UTILIZATION_EXPLICIT=1
                 shift 2
                 ;;
             --tensor-parallel-size)
                 TENSOR_PARALLEL_SIZE="$2"
+                TENSOR_PARALLEL_SIZE_EXPLICIT=1
                 shift 2
                 ;;
             --reasoning-parser)
                 REASONING_PARSER="$2"
+                REASONING_PARSER_EXPLICIT=1
                 shift 2
                 ;;
             --serve-extra-args)
                 SERVE_EXTRA_ARGS="$2"
+                SERVE_EXTRA_ARGS_EXPLICIT=1
                 shift 2
                 ;;
             --wait-timeout-sec)
                 WAIT_TIMEOUT_SEC="$2"
+                WAIT_TIMEOUT_SEC_EXPLICIT=1
                 shift 2
                 ;;
             --health-check-interval-sec)
                 HEALTH_CHECK_INTERVAL_SEC="$2"
+                HEALTH_CHECK_INTERVAL_SEC_EXPLICIT=1
                 shift 2
                 ;;
             --api-key)
                 API_KEY="$2"
+                API_KEY_EXPLICIT=1
                 shift 2
                 ;;
             --llm-timeout)
                 LLM_TIMEOUT="$2"
+                LLM_TIMEOUT_EXPLICIT=1
                 shift 2
                 ;;
             --vllm-ls-command)
                 VLLM_LS_COMMAND="$2"
+                VLLM_LS_COMMAND_EXPLICIT=1
                 shift 2
                 ;;
             --venv)
@@ -351,10 +445,12 @@ parse_args() {
                 ;;
             --skip-serve)
                 SKIP_SERVE=1
+                SKIP_SERVE_EXPLICIT=1
                 shift
                 ;;
             --keep-servers)
                 KEEP_SERVERS=1
+                KEEP_SERVERS_EXPLICIT=1
                 shift
                 ;;
             --help|-h)
@@ -385,6 +481,141 @@ require_file() {
 require_executable() {
     local path="$1"
     [[ -x "$path" ]] || die "Executable not found: $path"
+}
+
+apply_manifest_serve_config() {
+    local row
+    local key
+    local value
+    local output
+    local serve_rows
+
+    output="$("$PYTHON_BIN" - "$CONFIG_PATH" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+path = Path(sys.argv[1])
+payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+if not isinstance(payload, dict):
+    raise SystemExit(0)
+
+serve = payload.get("serve") or {}
+if not isinstance(serve, dict):
+    raise SystemExit(f"serve must be a mapping in manifest: {path}")
+
+aliases = {
+    "base_port": "BASE_PORT",
+    "ports": "PORTS_SPEC",
+    "ports_spec": "PORTS_SPEC",
+    "randomize_ports": "RANDOMIZE_PORTS",
+    "port_range_start": "PORT_RANGE_START",
+    "port_range_end": "PORT_RANGE_END",
+    "model_path": "MODEL_PATH",
+    "cache_root": "CACHE_ROOT",
+    "gpus": "GPUS_STR",
+    "gpus_str": "GPUS_STR",
+    "model_name": "MODEL_NAME",
+    "max_model_len": "MAX_MODEL_LEN",
+    "gpu_memory_utilization": "GPU_MEMORY_UTILIZATION",
+    "tensor_parallel_size": "TENSOR_PARALLEL_SIZE",
+    "reasoning_parser": "REASONING_PARSER",
+    "wait_timeout_sec": "WAIT_TIMEOUT_SEC",
+    "health_check_interval_sec": "HEALTH_CHECK_INTERVAL_SEC",
+    "api_key": "API_KEY",
+    "llm_timeout": "LLM_TIMEOUT",
+    "vllm_ls_command": "VLLM_LS_COMMAND",
+    "skip_serve": "SKIP_SERVE",
+    "keep_servers": "KEEP_SERVERS",
+    "serve_extra_args": "SERVE_EXTRA_ARGS",
+}
+
+for raw_key, raw_value in serve.items():
+    key = aliases.get(str(raw_key))
+    if key is None or raw_value is None:
+        continue
+    if isinstance(raw_value, bool):
+        value = "1" if raw_value else "0"
+    elif isinstance(raw_value, (list, tuple)):
+        value = " ".join(str(item) for item in raw_value)
+    else:
+        value = str(raw_value)
+    print(f"{key}\t{value}")
+PY
+    )" || die "Failed to read serve settings from manifest: $CONFIG_PATH"
+    mapfile -t serve_rows <<< "$output"
+
+    for row in "${serve_rows[@]}"; do
+        [[ -n "$row" ]] || continue
+        key="${row%%$'\t'*}"
+        value="${row#*$'\t'}"
+        case "$key" in
+            BASE_PORT)
+                [[ "$BASE_PORT_EXPLICIT" == "1" ]] || BASE_PORT="$value"
+                ;;
+            PORTS_SPEC)
+                [[ "$PORTS_SPEC_EXPLICIT" == "1" ]] || PORTS_SPEC="$value"
+                ;;
+            RANDOMIZE_PORTS)
+                [[ "$RANDOMIZE_PORTS_EXPLICIT" == "1" ]] || RANDOMIZE_PORTS="$value"
+                ;;
+            PORT_RANGE_START)
+                [[ "$PORT_RANGE_START_EXPLICIT" == "1" ]] || PORT_RANGE_START="$value"
+                ;;
+            PORT_RANGE_END)
+                [[ "$PORT_RANGE_END_EXPLICIT" == "1" ]] || PORT_RANGE_END="$value"
+                ;;
+            MODEL_PATH)
+                [[ "$MODEL_PATH_EXPLICIT" == "1" ]] || MODEL_PATH="$value"
+                ;;
+            CACHE_ROOT)
+                [[ "$CACHE_ROOT_EXPLICIT" == "1" ]] || CACHE_ROOT="$value"
+                ;;
+            GPUS_STR)
+                [[ "$GPUS_STR_EXPLICIT" == "1" ]] || GPUS_STR="$value"
+                ;;
+            MODEL_NAME)
+                [[ "$MODEL_NAME_EXPLICIT" == "1" ]] || MODEL_NAME="$value"
+                ;;
+            MAX_MODEL_LEN)
+                [[ "$MAX_MODEL_LEN_EXPLICIT" == "1" ]] || MAX_MODEL_LEN="$value"
+                ;;
+            GPU_MEMORY_UTILIZATION)
+                [[ "$GPU_MEMORY_UTILIZATION_EXPLICIT" == "1" ]] || GPU_MEMORY_UTILIZATION="$value"
+                ;;
+            TENSOR_PARALLEL_SIZE)
+                [[ "$TENSOR_PARALLEL_SIZE_EXPLICIT" == "1" ]] || TENSOR_PARALLEL_SIZE="$value"
+                ;;
+            REASONING_PARSER)
+                [[ "$REASONING_PARSER_EXPLICIT" == "1" ]] || REASONING_PARSER="$value"
+                ;;
+            WAIT_TIMEOUT_SEC)
+                [[ "$WAIT_TIMEOUT_SEC_EXPLICIT" == "1" ]] || WAIT_TIMEOUT_SEC="$value"
+                ;;
+            HEALTH_CHECK_INTERVAL_SEC)
+                [[ "$HEALTH_CHECK_INTERVAL_SEC_EXPLICIT" == "1" ]] || HEALTH_CHECK_INTERVAL_SEC="$value"
+                ;;
+            API_KEY)
+                [[ "$API_KEY_EXPLICIT" == "1" ]] || API_KEY="$value"
+                ;;
+            LLM_TIMEOUT)
+                [[ "$LLM_TIMEOUT_EXPLICIT" == "1" ]] || LLM_TIMEOUT="$value"
+                ;;
+            VLLM_LS_COMMAND)
+                [[ "$VLLM_LS_COMMAND_EXPLICIT" == "1" ]] || VLLM_LS_COMMAND="$value"
+                ;;
+            SKIP_SERVE)
+                [[ "$SKIP_SERVE_EXPLICIT" == "1" ]] || SKIP_SERVE="$value"
+                ;;
+            KEEP_SERVERS)
+                [[ "$KEEP_SERVERS_EXPLICIT" == "1" ]] || KEEP_SERVERS="$value"
+                ;;
+            SERVE_EXTRA_ARGS)
+                [[ "$SERVE_EXTRA_ARGS_EXPLICIT" == "1" ]] || SERVE_EXTRA_ARGS="$value"
+                ;;
+        esac
+    done
 }
 
 sanitize_proxy_env() {
@@ -671,11 +902,13 @@ fi
 if [[ "$VLLM_BIN_EXPLICIT" != "1" ]]; then
     VLLM_BIN="$VENV_DIR/bin/vllm"
 fi
+
+require_file "$CONFIG_PATH"
+require_executable "$PYTHON_BIN"
+apply_manifest_serve_config
 read -r -a GPUS <<< "$GPUS_STR"
 
 [[ ${#GPUS[@]} -gt 0 ]] || die "No GPUs configured."
-require_file "$CONFIG_PATH"
-require_executable "$PYTHON_BIN"
 sanitize_proxy_env
 build_ports
 
