@@ -1,9 +1,174 @@
 import unittest
+from unittest.mock import patch
 
 from distill.core.judge import judge_output, judge_output_with_timeout
 
 
 class InstructionFollowingJudgeTests(unittest.TestCase):
+
+    def test_yulan_ifeval_judge_spec_uses_lm_eval_backend(self):
+        row_data = {
+            "prompt": "Answer in exactly two sentences.",
+            "judge_spec": (
+                '{"suite":"ifeval","instruction_id_list":'
+                '["length_constraints:number_sentences"],"kwargs":'
+                '[{"num_sentences":2,"relation":"exactly"}],"strict":true}'
+            ),
+        }
+        messages = [{
+            "role": "assistant",
+            "content": "First sentence. Second sentence.",
+        }]
+
+        with patch(
+                "distill.core.judges.instruction_following._run_lm_eval_ifeval",
+                return_value={
+                    "prompt_level_strict_acc": True,
+                    "prompt_level_loose_acc": True,
+                    "inst_level_strict_acc": [True],
+                },
+        ) as mock_run:
+            result = judge_output(row_data,
+                                  messages,
+                                  judge_mode="instruction_following")
+
+        self.assertEqual(result["judge_type"], "instruction_following")
+        self.assertEqual(result["judge_backend"], "lm_eval_ifeval")
+        self.assertTrue(result["is_correct"])
+        self.assertEqual(result["judge_status"], "pass")
+        mock_run.assert_called_once()
+        called_prompt, called_answer, called_key, called_spec = mock_run.call_args.args
+        self.assertEqual(called_prompt, row_data["prompt"])
+        self.assertEqual(called_answer, messages[0]["content"])
+        self.assertEqual(called_key, row_data["prompt"])
+        self.assertEqual(called_spec["suite"], "ifeval")
+
+    def test_yulan_ifeval_extracted_judge_spec_can_fail(self):
+        row_data = {
+            "prompt": "Write in lowercase.",
+            "judge_spec": (
+                '{"suite":"ifeval_extracted","instruction_id_list":'
+                '["change_case:english_lowercase"],"kwargs":[{}],'
+                '"strict":true}'
+            ),
+        }
+        messages = [{
+            "role": "assistant",
+            "content": "Not lowercase.",
+        }]
+
+        with patch(
+                "distill.core.judges.instruction_following._run_lm_eval_ifeval",
+                return_value={
+                    "prompt_level_strict_acc": False,
+                    "prompt_level_loose_acc": False,
+                    "inst_level_strict_acc": [False],
+                },
+        ):
+            result = judge_output(row_data,
+                                  messages,
+                                  judge_mode="instruction_following")
+
+        self.assertEqual(result["judge_backend"], "lm_eval_ifeval")
+        self.assertFalse(result["is_correct"])
+        self.assertEqual(result["judge_status"], "wrong_answer")
+
+    def test_yulan_ifbench_judge_spec_is_not_assumed_correct(self):
+        row_data = {
+            "prompt": "Use an IFBench-only constraint.",
+            "judge_spec": (
+                '{"suite":"ifbench","instruction_id_list":'
+                '["unknown:constraint"],"kwargs":[{}],"strict":true}'
+            ),
+        }
+        messages = [{
+            "role": "assistant",
+            "content": "Plain response",
+        }]
+
+        result = judge_output(row_data,
+                              messages,
+                              judge_mode="instruction_following")
+
+        self.assertEqual(result["judge_backend"], "ifbench_rule_v1")
+        self.assertFalse(result["is_correct"])
+        self.assertEqual(result["judge_status"], "unsupported")
+        self.assertEqual(result["judge_detail"]["suite"], "ifbench")
+
+    def test_yulan_ifbench_supported_constraints_can_pass(self):
+        row_data = {
+            "prompt": (
+                "Use no commas. Include keyword apple once and keyword pear "
+                "twice. The last word of each sentence should be done."
+            ),
+            "judge_spec": (
+                '{"suite":"ifbench","instruction_id_list":'
+                '["punctuation:no_comma","count:count_increment_word",'
+                '"last_word:last_word_sent"],"kwargs":[null,'
+                '{"keyword1":"apple","keyword2":"pear"},'
+                '{"last_word":"done"}],"strict":true}'
+            ),
+        }
+        messages = [{
+            "role": "assistant",
+            "content": "apple pear pear done.",
+        }]
+
+        result = judge_output(row_data,
+                              messages,
+                              judge_mode="instruction_following")
+
+        self.assertEqual(result["judge_backend"], "ifbench_rule_v1")
+        self.assertTrue(result["is_correct"])
+        self.assertEqual(result["judge_status"], "pass")
+
+    def test_yulan_ifbench_supported_constraints_can_fail(self):
+        row_data = {
+            "prompt": "Use no commas and include keyword apple.",
+            "judge_spec": (
+                '{"suite":"ifbench","instruction_id_list":'
+                '["punctuation:no_comma","keywords:existence"],'
+                '"kwargs":[null,{"keywords":["apple"]}],"strict":true}'
+            ),
+        }
+        messages = [{
+            "role": "assistant",
+            "content": "pear, only",
+        }]
+
+        result = judge_output(row_data,
+                              messages,
+                              judge_mode="instruction_following")
+
+        self.assertEqual(result["judge_backend"], "ifbench_rule_v1")
+        self.assertFalse(result["is_correct"])
+        self.assertEqual(result["judge_status"], "wrong_answer")
+
+    def test_yulan_ifeval_missing_lm_eval_is_not_correct(self):
+        row_data = {
+            "prompt": "Answer in lowercase.",
+            "judge_spec": (
+                '{"suite":"ifeval","instruction_id_list":'
+                '["change_case:english_lowercase"],"kwargs":[{}],'
+                '"strict":true}'
+            ),
+        }
+        messages = [{
+            "role": "assistant",
+            "content": "lowercase",
+        }]
+
+        with patch(
+                "distill.core.judges.instruction_following._run_lm_eval_ifeval",
+                side_effect=ImportError("No module named 'lm_eval'"),
+        ):
+            result = judge_output(row_data,
+                                  messages,
+                                  judge_mode="instruction_following")
+
+        self.assertEqual(result["judge_backend"], "lm_eval_ifeval")
+        self.assertIsNone(result["is_correct"])
+        self.assertEqual(result["judge_status"], "missing_dependency")
 
     def test_structured_if_constraints_pass_when_all_supported_rules_match(self):
         row_data = {

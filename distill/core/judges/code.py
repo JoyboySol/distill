@@ -1,5 +1,6 @@
 import contextlib
 import io
+import json
 import multiprocessing
 import re
 import signal
@@ -221,6 +222,39 @@ def extract_code_text_last_block(text: str) -> str:
     return extract_code_text(text)
 
 
+def _unit_tests_from_tests_field(row_data: Dict[str, Any]) -> Optional[str]:
+    raw = row_data.get("tests")
+    if isinstance(raw, str):
+        if not raw.strip():
+            return None
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+    elif isinstance(raw, dict):
+        parsed = raw
+    else:
+        return None
+
+    unit_tests = parsed.get("unit_tests")
+    if not isinstance(unit_tests, list):
+        return None
+
+    statuses = parsed.get("tests_execution_status")
+    selected: List[str] = []
+    if isinstance(statuses, list) and len(statuses) == len(unit_tests):
+        for test, status in zip(unit_tests, statuses):
+            if str(status).strip().lower() == "pass" and isinstance(test, str):
+                selected.append(test)
+    else:
+        selected = [test for test in unit_tests if isinstance(test, str)]
+
+    selected = [test.strip() for test in selected if test.strip()]
+    if not selected:
+        return None
+    return "\n".join(selected)
+
+
 def _looks_like_code_text(text: Optional[str]) -> bool:
     if not isinstance(text, str) or not text.strip():
         return False
@@ -251,6 +285,7 @@ def _looks_like_code_task(row_data: Dict[str, Any]) -> bool:
         "evaluation_sample",
         "public_test_cases",
         "private_test_cases",
+        "tests",
         "test",
         "test_list",
         "test_list_2",
@@ -337,6 +372,21 @@ def judge_code(row_data: Dict[str, Any],
             "judge_status": status,
             "judge_detail": {
                 "timeout_seconds": 10
+            },
+        }
+
+    unit_tests = _unit_tests_from_tests_field(row_data)
+    if unit_tests:
+        status = run_python_program(extract_code_text(content).rstrip() + "\n" +
+                                    unit_tests,
+                                    timeout=10)
+        return {
+            "judge_type": "code_unit_tests",
+            "is_correct": status == "pass",
+            "judge_status": status,
+            "judge_detail": {
+                "timeout_seconds": 10,
+                "test_source": "tests_unit_tests",
             },
         }
 
@@ -427,6 +477,8 @@ def code_judge_type_hint(row_data: Dict[str, Any],
         code_test = "\n".join(str(x) for x in code_test)
     if isinstance(code_test, str) and code_test.strip():
         return "code_mbpp"
+    if _unit_tests_from_tests_field(row_data):
+        return "code_unit_tests"
 
     humaneval_program = build_humaneval_program(row_data,
                                                 extract_code_text(
@@ -444,4 +496,3 @@ def code_judge_type_hint(row_data: Dict[str, Any],
         return "code_unverified"
 
     return None
-

@@ -1,0 +1,49 @@
+task_name: yulan_code
+
+serve:
+  model_path: /root/nas/share/vc0e4b0o65t5/lvzhihao/PostTrain/distill/models/Qwen3.6-35B-A3B
+  model_name: Qwen3.6-35B-A3B
+  max_model_len: 65536
+  gpus: "0 1 2 3"
+  serve_extra_args: "--max-num-seqs 128"
+
+input_dir: /root/nas/share/vc0e4b0o65t5/lvzhihao/PostTrain/distill/data/YuLan-Code-split/judge
+output_dir: /root/nas/share/vc0e4b0o65t5/lvzhihao/PostTrain/distill/trajectories/YuLan-Code-judge
+failure_log: yulan_code_failed.jsonl
+
+file_pattern: code.parquet
+input_field: query
+judge_mode: code
+label_field:
+
+model: Qwen3.6-35B-A3B
+enable_thinking: true
+system_prompt: |
+  You are a careful competitive programming assistant.
+  Solve the problem and provide the final Python solution in a single fenced ```python``` code block.
+
+concurrency: 128
+judge_concurrency: 8
+active_files: 1
+rollout_count: 8
+max_tokens: 60000
+temperature: 1.0
+batch_size: 500
+
+segment_size_mb: 1
+segment_flush_interval_sec: 10
+shard_size_mb: 200
+write_retries: 3
+
+merge_every_n_writes:
+upload_every_n_merges:
+upload_merged_shards: false
+treat_no_judge_as_correct: false
+hf_repo_id:
+hf_repo_type: dataset
+hf_remote_prefix:
+hf_token:
+
+range_start: 0
+range_end:
+sample_limit:

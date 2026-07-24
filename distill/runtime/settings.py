@@ -101,6 +101,8 @@ class PipelineConfig:
     model_name: str
     api_key: Optional[str]
     base_urls: List[str]
+    system_prompt: Optional[str] = None
+    enable_thinking: bool = False
     api_keys: Optional[List[str]] = None
     api_key_concurrency: int = 0
     vllm_ls_command: Optional[str] = DEFAULT_VLLM_LS_COMMAND
@@ -115,6 +117,7 @@ class PipelineConfig:
     range_end: Optional[int] = None
     sample_limit: Optional[int] = None
     judge_mode: str = "auto"
+    judge_suites: Optional[List[str]] = None
     complete_trailing_user_turn: bool = False
 
     input_content_field: str = "question"
@@ -129,6 +132,7 @@ class PipelineConfig:
     rollout_count: int = 1
     llm_timeout: float = DEFAULT_LLM_TIMEOUT
     llm_max_tokens: int = 7000
+    llm_temperature: float = 0.2
     segment_flush_interval_sec: float = 0.0
 
     write_retries: int = 3

@@ -72,6 +72,9 @@ class AsyncLLMManager:
         self.model = config.model_name
         self.timeout = config.llm_timeout
         self.max_tokens = config.llm_max_tokens
+        self.temperature = config.llm_temperature
+        self.system_prompt = config.system_prompt
+        self.enable_thinking = bool(config.enable_thinking)
         self.base_urls = list(config.base_urls)
         if not self.base_urls:
             raise ValueError("AsyncLLMManager requires at least one base URL.")
@@ -333,22 +336,39 @@ class AsyncLLMManager:
 
     async def _chat_completion_create(self, backend: BackendState,
                                       messages: List[Dict[str, Any]]):
+        effective_messages = self._with_system_prompt(messages)
         payload_messages = [
-            compact_message_payload(message) for message in messages
+            compact_message_payload(message) for message in effective_messages
         ]
         return await backend.client.chat.completions.create(
             model=self.model,
             messages=payload_messages,
-            temperature=0.2,
+            temperature=self.temperature,
             max_tokens=self.max_tokens,
             timeout=self.timeout,
             top_p=0.95,
             extra_body={
                 "chat_template_kwargs": {
-                    "enable_thinking": False
+                    "enable_thinking": self.enable_thinking
                 }
             },
         )
+
+    def _with_system_prompt(
+            self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not self.system_prompt or not self.system_prompt.strip():
+            return messages
+        if messages and messages[0].get("role") == "system":
+            return messages
+        system_message = ensure_message_shape({
+            "role": "system",
+            "content": self.system_prompt.strip(),
+            "reasoning_content": None,
+            "tool_calls": None,
+            "tool_call_id": None,
+            "name": None,
+        })
+        return [system_message, *messages]
 
     @staticmethod
     def _assistant_message_from_response(response: Any) -> Optional[Dict[str, Any]]:
@@ -356,11 +376,17 @@ class AsyncLLMManager:
         if choice.message.content is None:
             logger.warning("Got None content! Raw response %s", choice)
             return None
+        reasoning_content = getattr(choice.message, "reasoning_content", None)
+        if reasoning_content is None:
+            reasoning_content = getattr(choice.message, "reasoning", None)
+        if reasoning_content is None:
+            model_extra = getattr(choice.message, "model_extra", None) or {}
+            reasoning_content = model_extra.get(
+                "reasoning_content") or model_extra.get("reasoning")
         return ensure_message_shape({
             "role": "assistant",
             "content": choice.message.content,
-            "reasoning_content": getattr(choice.message, "reasoning_content",
-                                         None),
+            "reasoning_content": reasoning_content,
             "tool_calls": getattr(choice.message, "tool_calls", None),
             "tool_call_id": getattr(choice.message, "tool_call_id", None),
             "name": getattr(choice.message, "name", None),
@@ -471,11 +497,12 @@ class AsyncLLMManager:
             "tool_call_id": None,
             "name": None,
         })
-        response = await self.generate_messages_with_retry([user_msg])
+        input_messages = self._with_system_prompt([user_msg])
+        response = await self.generate_messages_with_retry(input_messages)
         if response is None:
             return None
         return {
-            "messages": [user_msg, response["assistant_message"]],
+            "messages": [*input_messages, response["assistant_message"]],
             "finish_reason": response.get("finish_reason"),
             "usage": response.get("usage") or {},
         }

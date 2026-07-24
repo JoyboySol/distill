@@ -1,4 +1,4 @@
-task_name: yulan_math
+task_name: yulan_code_no_judge
 
 serve:
   model_path: /workspace/lvzhihao/PostTrain/distill/models/Qwen3.6-35B-A3B
@@ -7,29 +7,28 @@ serve:
   gpus: "0 1 2 3"
   serve_extra_args: "--max-num-seqs 128"
 
-input_dir: /workspace/lvzhihao/PostTrain/distill/data/YuLan-Math
-output_dir: /workspace/lvzhihao/PostTrain/distill/trajectories/YuLan-Math
-failure_log: yulan_math_failed.jsonl
+input_dir: /workspace/lvzhihao/PostTrain/distill/data/YuLan-Code-split/no_judge
+output_dir: /workspace/lvzhihao/PostTrain/distill/trajectories/YuLan-Code-no-judge
+failure_log: yulan_code_no_judge_failed.jsonl
 
-file_pattern: YuLan-Math.jsonl
+file_pattern: "code.parquet"
 input_field: query
-judge_mode: math
-label_field: answer
+judge_mode: none
+label_field:
 
 model: Qwen3.6-35B-A3B
 enable_thinking: true
 system_prompt: |
-  You are a careful mathematical reasoning assistant.
-  Solve the problem step by step. The final answer must be placed in \boxed{}.
-  Do not put intermediate values in \boxed{}; only box the final answer.
+  You are a careful coding assistant.
+  Provide the final Python solution in a single fenced ```python``` code block.
 
-concurrency: 256
-judge_concurrency: 16
+concurrency: 128
+judge_concurrency: 1
 active_files: 1
-rollout_count: 8
+rollout_count: 1
 max_tokens: 60000
 temperature: 1.0
-batch_size: 1000
+batch_size: 500
 
 segment_size_mb: 1
 segment_flush_interval_sec: 10
@@ -39,7 +38,7 @@ write_retries: 3
 merge_every_n_writes:
 upload_every_n_merges:
 upload_merged_shards: false
-treat_no_judge_as_correct: false
+treat_no_judge_as_correct: true
 hf_repo_id:
 hf_repo_type: dataset
 hf_remote_prefix:

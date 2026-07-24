@@ -3,12 +3,14 @@ import sys
 from dataclasses import dataclass
 from typing import Callable, Optional, Sequence
 
-from .commands import (avg_correct_tokens, download, eval_existing_outputs,
+from .commands import (avg_correct_tokens, current_stats, download,
+                       eval_existing_outputs,
                        hydrate_opencode_reasoning_split1,
                        manifest_token_stats, merge_correct_segments,
                        profile_manifest_inputs,
                        prepare_opencode_reasoning,
                        rebuild_correct_segments, rejudge_saved_outputs,
+                       split_yulan_code,
                        rewrite_completed_index_paths, run, stats)
 
 DEFAULT_PIPELINE_VALUES = run.DEFAULT_PIPELINE_VALUES
@@ -46,6 +48,12 @@ COMMAND_SPECS = (
         help_text="Summarize saved distill output shards.",
         build_parser=stats.build_parser,
         handler=stats.run_namespace,
+    ),
+    CommandSpec(
+        name="current-stats",
+        help_text="Summarize current segment outputs with accuracy and tokens.",
+        build_parser=current_stats.build_parser,
+        handler=current_stats.run_namespace,
     ),
     CommandSpec(
         name="download",
@@ -106,6 +114,12 @@ COMMAND_SPECS = (
         help_text="Hydrate OpenCodeReasoning split_1 prompts/tests.",
         build_parser=hydrate_opencode_reasoning_split1.build_parser,
         handler=hydrate_opencode_reasoning_split1.run_namespace,
+    ),
+    CommandSpec(
+        name="split-yulan-code",
+        help_text="Split YuLan-Code by judge availability and response language.",
+        build_parser=split_yulan_code.build_parser,
+        handler=split_yulan_code.run_namespace,
     ),
     CommandSpec(
         name="rewrite-completed-index-paths",

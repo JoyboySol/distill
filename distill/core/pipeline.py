@@ -1028,6 +1028,30 @@ class DistillPipeline:
             normalized[key] = value
         return normalized
 
+    @staticmethod
+    def _row_judge_suite(row_data: Dict[str, Any]) -> Optional[str]:
+        raw_spec = row_data.get("judge_spec")
+        if isinstance(raw_spec, str):
+            if not raw_spec.strip():
+                return None
+            try:
+                raw_spec = json.loads(raw_spec)
+            except Exception:
+                return None
+        if not isinstance(raw_spec, dict):
+            return None
+        suite = raw_spec.get("suite")
+        if suite is None:
+            return None
+        return str(suite)
+
+    def _row_matches_judge_suite_filter(self, row_data: Dict[str, Any]) -> bool:
+        allowed = self.config.judge_suites or []
+        if not allowed:
+            return True
+        suite = self._row_judge_suite(row_data)
+        return suite in set(str(item) for item in allowed)
+
     def _jsonl_batch_iterator(self,
                               file_path: str,
                               batch_size: int) -> Iterator[pa.Table]:
@@ -1122,6 +1146,11 @@ class DistillPipeline:
                             break
                         source_file = os.path.abspath(file_path)
                         source_row = current_idx
+
+                        if not self._row_matches_judge_suite_filter(row_data):
+                            current_idx += 1
+                            continue
+
                         if row_budget is not None:
                             row_budget -= 1
 

@@ -23,6 +23,34 @@ class MultiTurnPipelineTests(unittest.IsolatedAsyncioTestCase):
         )
         return DistillPipeline(config)
 
+    def test_judge_suite_filter_matches_yulan_standard_suites(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = self._build_pipeline(tmpdir)
+            pipeline.config.judge_suites = ["ifeval", "ifeval_extracted"]
+
+            self.assertTrue(
+                pipeline._row_matches_judge_suite_filter({
+                    "judge_spec": json.dumps({
+                        "suite": "ifeval"
+                    })
+                }))
+            self.assertTrue(
+                pipeline._row_matches_judge_suite_filter({
+                    "judge_spec": json.dumps({
+                        "suite": "ifeval_extracted"
+                    })
+                }))
+            self.assertFalse(
+                pipeline._row_matches_judge_suite_filter({
+                    "judge_spec": json.dumps({
+                        "suite": "ifbench"
+                    })
+                }))
+            self.assertFalse(
+                pipeline._row_matches_judge_suite_filter({
+                    "judge_spec": "not json"
+                }))
+
     async def test_worker_distills_multiturn_conversation_with_distilled_history(
             self):
         with tempfile.TemporaryDirectory() as tmpdir:

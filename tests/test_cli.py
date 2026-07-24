@@ -137,6 +137,18 @@ class RootCliTests(unittest.TestCase):
 
         self.assertEqual(args.command, "download")
 
+    def test_build_root_parser_accepts_split_yulan_code_subcommand(self):
+        parser = root_cli.build_root_parser()
+        args = parser.parse_args([
+            "split-yulan-code",
+            "--input-path",
+            "/tmp/code.parquet",
+            "--output-dir",
+            "/tmp/split",
+        ])
+
+        self.assertEqual(args.command, "split-yulan-code")
+
     def test_main_routes_legacy_pipeline_args_to_run_dispatch(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = Path(tmpdir) / "task.yaml"

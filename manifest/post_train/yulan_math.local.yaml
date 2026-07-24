@@ -1,11 +1,10 @@
 task_name: yulan_math
 
 serve:
-  model_path: /workspace/lvzhihao/PostTrain/distill/models/Qwen3.6-35B-A3B
-  model_name: Qwen3.6-35B-A3B
+  model_path: /workspace/lvzhihao/PostTrain/distill/models/Qwen3.6-27B
+  model_name: Qwen3.6-27B
   max_model_len: 65536
   gpus: "0 1 2 3"
-  serve_extra_args: "--max-num-seqs 128"
 
 input_dir: /workspace/lvzhihao/PostTrain/distill/data/YuLan-Math
 output_dir: /workspace/lvzhihao/PostTrain/distill/trajectories/YuLan-Math
@@ -16,19 +15,13 @@ input_field: query
 judge_mode: math
 label_field: answer
 
-model: Qwen3.6-35B-A3B
-enable_thinking: true
-system_prompt: |
-  You are a careful mathematical reasoning assistant.
-  Solve the problem step by step. The final answer must be placed in \boxed{}.
-  Do not put intermediate values in \boxed{}; only box the final answer.
+model: Qwen3.6-27B
 
 concurrency: 256
 judge_concurrency: 16
 active_files: 1
 rollout_count: 8
-max_tokens: 60000
-temperature: 1.0
+max_tokens: 65536
 batch_size: 1000
 
 segment_size_mb: 1

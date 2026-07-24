@@ -1,0 +1,4 @@
+interface:
+  display_name: "PostTrain Distill Qwen"
+  short_description: "Run Qwen PostTrain distillation with vLLM reasoning."
+  default_prompt: "Use this skill to run or debug Qwen3.6 PostTrain distillation with vLLM reasoning, boxed math answers, judge checks, and clean restarts."

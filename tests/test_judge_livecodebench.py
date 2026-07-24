@@ -94,6 +94,58 @@ class LiveCodeBenchJudgeTests(unittest.TestCase):
         self.assertEqual(result["judge_detail"]["test_source"],
                          "public_private_test_cases")
 
+    def test_yulan_code_tests_are_supported(self):
+        row_data = {
+            "tests": json.dumps({
+                "public_tests": {
+                    "input": ["1 2\n"],
+                    "output": ["3\n"],
+                },
+                "private_tests": {
+                    "input": ["4 5\n"],
+                    "output": ["9\n"],
+                },
+                "generated_tests": {
+                    "input": ["10 20\n"],
+                    "output": ["999\n"],
+                },
+            })
+        }
+        messages = [{
+            "role": "assistant",
+            "content": "```python\na, b = map(int, input().split())\nprint(a + b)\n```",
+        }]
+
+        result = judge_output(row_data, messages)
+
+        self.assertTrue(result["is_correct"])
+        self.assertEqual(result["judge_status"], "pass")
+        self.assertEqual(result["judge_detail"]["mode"], "standard_input")
+        self.assertEqual(result["judge_detail"]["test_source"],
+                         "yulan_code_tests")
+        self.assertEqual(result["judge_detail"]["passed_tests"], 2)
+
+    def test_tests_field_input_output_is_supported(self):
+        row_data = {
+            "tests": json.dumps({
+                "inputs": ["1 2\n", "4 5\n"],
+                "outputs": ["3\n", "9\n"],
+                "fn_name": None,
+            })
+        }
+        messages = [{
+            "role": "assistant",
+            "content": "```python\na, b = map(int, input().split())\nprint(a + b)\n```",
+        }]
+
+        result = judge_output(row_data, messages)
+
+        self.assertTrue(result["is_correct"])
+        self.assertEqual(result["judge_status"], "pass")
+        self.assertEqual(result["judge_detail"]["test_source"],
+                         "tests_input_output")
+        self.assertEqual(result["judge_detail"]["passed_tests"], 2)
+
     def test_timeout_guard_matches_direct_judge_for_simple_case(self):
         row_data = {
             "input_output": json.dumps({
@@ -132,6 +184,46 @@ class LiveCodeBenchJudgeTests(unittest.TestCase):
 
         self.assertEqual(result["judge_type"], "code_mbpp")
         self.assertTrue(result["is_correct"])
+
+    def test_tests_field_unit_tests_are_supported(self):
+        row_data = {
+            "tests": json.dumps({
+                "unit_tests": [
+                    "assert add(1, 2) == 3",
+                    "assert add(2, 2) == 999",
+                ],
+                "tests_execution_status": ["pass", "fail"],
+            })
+        }
+        messages = [{
+            "role": "assistant",
+            "content": "```python\ndef add(a, b):\n    return a + b\n```",
+        }]
+
+        result = judge_output(row_data, messages)
+
+        self.assertEqual(result["judge_type"], "code_unit_tests")
+        self.assertTrue(result["is_correct"])
+        self.assertEqual(result["judge_status"], "pass")
+        self.assertEqual(result["judge_detail"]["test_source"],
+                         "tests_unit_tests")
+
+    def test_tests_field_unit_tests_without_passing_tests_are_unverified(self):
+        row_data = {
+            "tests": json.dumps({
+                "unit_tests": ["assert add(1, 2) == 999"],
+                "tests_execution_status": ["fail"],
+            })
+        }
+        messages = [{
+            "role": "assistant",
+            "content": "```python\ndef add(a, b):\n    return a + b\n```",
+        }]
+
+        result = judge_output(row_data, messages)
+
+        self.assertEqual(result["judge_type"], "code_unverified")
+        self.assertIsNone(result["is_correct"])
 
     def test_extract_code_prefers_python_block_over_later_non_python_block(self):
         content = """Explanation

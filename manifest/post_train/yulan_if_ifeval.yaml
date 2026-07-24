@@ -1,4 +1,4 @@
-task_name: yulan_math
+task_name: yulan_if_ifeval
 
 serve:
   model_path: /workspace/lvzhihao/PostTrain/distill/models/Qwen3.6-35B-A3B
@@ -7,27 +7,29 @@ serve:
   gpus: "0 1 2 3"
   serve_extra_args: "--max-num-seqs 128"
 
-input_dir: /workspace/lvzhihao/PostTrain/distill/data/YuLan-Math
-output_dir: /workspace/lvzhihao/PostTrain/distill/trajectories/YuLan-Math
-failure_log: yulan_math_failed.jsonl
+input_dir: /workspace/lvzhihao/PostTrain/distill/data/YuLan-IF
+output_dir: /workspace/lvzhihao/PostTrain/distill/trajectories/YuLan-IF-ifeval
+failure_log: yulan_if_ifeval_failed.jsonl
 
-file_pattern: YuLan-Math.jsonl
-input_field: query
-judge_mode: math
-label_field: answer
+file_pattern: train.jsonl
+input_field: prompt
+judge_mode: instruction_following
+judge_suites:
+  - ifeval
+  - ifeval_extracted
+label_field:
 
 model: Qwen3.6-35B-A3B
 enable_thinking: true
 system_prompt: |
-  You are a careful mathematical reasoning assistant.
-  Solve the problem step by step. The final answer must be placed in \boxed{}.
-  Do not put intermediate values in \boxed{}; only box the final answer.
+  Follow the user's instruction exactly. Return only the requested response.
 
 concurrency: 256
 judge_concurrency: 16
+judge_timeout_sec: 60
 active_files: 1
 rollout_count: 8
-max_tokens: 60000
+max_tokens: 12000
 temperature: 1.0
 batch_size: 1000
 

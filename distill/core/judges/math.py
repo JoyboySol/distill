@@ -3,6 +3,12 @@ from typing import Any, Dict, Optional
 
 
 class MathJudge:
+    ANSWER_CUE_RE = re.compile(
+        r"(final\s+answer|answer\s+is|answer:|conclusion|therefore|hence|"
+        r"the\s+value|the\s+result)",
+        re.IGNORECASE,
+    )
+
     @staticmethod
     def last_boxed_only_string(string: str):
         idx = string.rfind("\\boxed")
@@ -151,15 +157,88 @@ class MathJudge:
         return final_answer
 
     @classmethod
+    def _rhs_if_simple_equation(cls, text: str) -> str:
+        text = text.strip()
+        if "=" not in text:
+            return text
+        parts = [part.strip() for part in text.split("=") if part.strip()]
+        if len(parts) < 2:
+            return text
+        rhs = parts[-1].strip()
+        if re.search(r"\d|\\frac|\\sqrt|\\pi|\\infty", rhs):
+            return rhs
+        return text
+
+    @classmethod
+    def _extract_answer_fragment(cls, text: str) -> Optional[str]:
+        text = text.strip()
+        if not text:
+            return None
+
+        boxed = cls.extract_boxed_answer(text, strip_double_curly_brace=True)
+        if boxed:
+            return boxed
+
+        math_patterns = [
+            r"\\\[(.*?)\\\]",
+            r"\$\$(.*?)\$\$",
+            r"\\\((.*?)\\\)",
+            r"\$([^$\n]+)\$",
+        ]
+        for pattern in math_patterns:
+            matches = re.findall(pattern, text, flags=re.DOTALL)
+            if matches:
+                return cls._rhs_if_simple_equation(matches[-1])
+
+        bold_matches = re.findall(r"\*\*([^*\n]+)\*\*", text)
+        for bold_match in reversed(bold_matches):
+            if cls.ANSWER_CUE_RE.search(bold_match) and not re.search(
+                    r"\d|\\frac|\\sqrt|\\pi|\\infty", bold_match):
+                continue
+            return cls._rhs_if_simple_equation(bold_match)
+
+        cue_match = re.search(
+            r"(?:final\s+answer|answer|value|result)\s*(?:is|=|:)\s*(.+)$",
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if cue_match:
+            return cls._rhs_if_simple_equation(cue_match.group(1))
+
+        numeric_matches = re.findall(
+            r"[-+]?\d[\d,]*(?:\.\d+)?(?:\s*/\s*[-+]?\d[\d,]*)?", text)
+        if numeric_matches:
+            return numeric_matches[-1]
+        return None
+
+    @classmethod
     def math_postprocess_v2(cls, text: str) -> str:
         cand_ans = cls.extract_boxed_answer(
             text, strip_double_curly_brace=True)
         if cand_ans:
             return cand_ans
-        for maybe_ans in text.split("."):
-            if re.search(r"final answer|answer is", maybe_ans.lower()):
-                return cls.normalize_final_answer(maybe_ans)
-        return cls.normalize_final_answer(text.split(".")[0])
+
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        cue_windows = []
+        for idx, line in enumerate(lines):
+            if cls.ANSWER_CUE_RE.search(line):
+                cue_windows.append("\n".join(lines[idx:idx + 3]))
+        for window in reversed(cue_windows):
+            fragment = cls._extract_answer_fragment(window)
+            if fragment:
+                return cls.normalize_final_answer(fragment)
+
+        for line in reversed(lines):
+            fragment = cls._extract_answer_fragment(line)
+            if fragment:
+                return cls.normalize_final_answer(fragment)
+
+        sentences = [part.strip() for part in re.split(r"[.!?]", text) if part.strip()]
+        for sentence in reversed(sentences):
+            fragment = cls._extract_answer_fragment(sentence)
+            if fragment:
+                return cls.normalize_final_answer(fragment)
+        return cls.normalize_final_answer(text)
 
     @staticmethod
     def _fix_fracs(string: str):
@@ -415,25 +494,45 @@ def judge_math(row_data: Dict[str, Any],
         try:
             verify_result = MathVerifyJudge.verify(content, raw_reference)
             if verify_result["usable"]:
-                return {
-                    "judge_type": "math",
-                    "judge_backend": "math_verify",
-                    "is_correct": verify_result["is_correct"],
-                    "judge_status":
-                    "pass" if verify_result["is_correct"] else "wrong_answer",
-                    "judge_detail": {
-                        "label_field": label_field,
-                        **verify_result["detail"],
-                    },
+                if verify_result["is_correct"]:
+                    return {
+                        "judge_type": "math",
+                        "judge_backend": "math_verify",
+                        "is_correct": True,
+                        "judge_status": "pass",
+                        "judge_detail": {
+                            "label_field": label_field,
+                            **verify_result["detail"],
+                        },
+                    }
+                verify_failure = {
+                    "verify_fallback_reason": "math_verify_wrong_answer",
+                    **verify_result["detail"],
                 }
+            else:
+                verify_failure = {
+                    "verify_fallback_reason":
+                    verify_result["detail"].get("reason", "not_usable"),
+                }
+
+            if pred:
+                pred_verify_result = MathVerifyJudge.verify(pred, raw_reference)
+                if pred_verify_result["usable"] and pred_verify_result[
+                        "is_correct"]:
+                    return {
+                        "judge_type": "math",
+                        "judge_backend": "math_verify",
+                        "is_correct": True,
+                        "judge_status": "pass",
+                        "judge_detail": {
+                            "label_field": label_field,
+                            "extraction_source": "math_postprocess_v2",
+                            **pred_verify_result["detail"],
+                        },
+                    }
         except Exception as exc:
             verify_failure = {
                 "verify_error": f"{type(exc).__name__}:{exc}",
-            }
-        else:
-            verify_failure = {
-                "verify_fallback_reason":
-                verify_result["detail"].get("reason", "not_usable"),
             }
     else:
         verify_failure = {
@@ -454,4 +553,3 @@ def judge_math(row_data: Dict[str, Any],
         "judge_status": "pass" if is_correct else "wrong_answer",
         "judge_detail": detail,
     }
-

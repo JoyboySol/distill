@@ -28,8 +28,11 @@ DEFAULT_PIPELINE_VALUES: Dict[str, Any] = {
     "range_end": None,
     "sample_limit": None,
     "judge_mode": "auto",
+    "judge_suites": None,
     "complete_trailing_user_turn": False,
     "model": "Qwen3-30B-A3B-Thinking-2507",
+    "system_prompt": None,
+    "enable_thinking": False,
     "api_key": os.getenv("OPENAI_API_KEY", "EMPTY"),
     "api_keys": None,
     "api_key_concurrency": 0,
@@ -47,6 +50,7 @@ DEFAULT_PIPELINE_VALUES: Dict[str, Any] = {
     "label_field": None,
     "llm_timeout": DEFAULT_LLM_TIMEOUT,
     "max_tokens": 7000,
+    "temperature": 0.2,
     "shard_size_mb": 200,
     "segment_size_mb": 4,
     "segment_flush_interval_sec": 0.0,
@@ -71,7 +75,10 @@ CONFIG_KEY_ALIASES = {
     "range-end": "range_end",
     "sample-limit": "sample_limit",
     "judge-mode": "judge_mode",
+    "judge-suites": "judge_suites",
     "complete-trailing-user-turn": "complete_trailing_user_turn",
+    "system-prompt": "system_prompt",
+    "enable-thinking": "enable_thinking",
     "api-key": "api_key",
     "api-keys": "api_keys",
     "api-key-concurrency": "api_key_concurrency",
@@ -237,6 +244,13 @@ def build_parser(add_help: bool = True) -> argparse.ArgumentParser:
     )
     _add_argument(
         parser,
+        "--judge-suites",
+        nargs="+",
+        help=("Only queue rows whose JSON judge_spec.suite is in this allowlist. "
+              "Values may be comma/newline separated."),
+    )
+    _add_argument(
+        parser,
         "--complete-trailing-user-turn",
         action="store_true",
         help=("For multi-turn inputs ending in a user turn, generate one extra "
@@ -244,6 +258,18 @@ def build_parser(add_help: bool = True) -> argparse.ArgumentParser:
     )
 
     _add_argument(parser, "--model", type=str)
+    _add_argument(
+        parser,
+        "--system-prompt",
+        type=str,
+        help="Optional system prompt prepended to each generation request.",
+    )
+    _add_argument(
+        parser,
+        "--enable-thinking",
+        action="store_true",
+        help="Pass enable_thinking=true through chat_template_kwargs.",
+    )
     _add_argument(
         parser,
         "--api-key",
@@ -454,6 +480,8 @@ def _build_config_from_values(values: Dict[str, Any]) -> PipelineConfig:
         model_name=values["model"],
         api_key=values["api_key"],
         base_urls=base_urls,
+        system_prompt=values.get("system_prompt"),
+        enable_thinking=bool(values.get("enable_thinking", False)),
         api_keys=_resolve_optional_env_items(values.get("api_keys")),
         api_key_concurrency=int(values.get("api_key_concurrency", 0) or 0),
         vllm_ls_command=values.get("vllm_ls_command"),
@@ -470,11 +498,13 @@ def _build_config_from_values(values: Dict[str, Any]) -> PipelineConfig:
         rollout_count=values["rollout_count"],
         llm_timeout=values["llm_timeout"],
         llm_max_tokens=values["max_tokens"],
+        llm_temperature=float(values.get("temperature", 0.2)),
         file_pattern=values["file_pattern"],
         range_start=values["range_start"],
         range_end=values["range_end"],
         sample_limit=values["sample_limit"],
         judge_mode=normalized_judge_mode,
+        judge_suites=split_text_items(values.get("judge_suites")),
         complete_trailing_user_turn=bool(values.get(
             "complete_trailing_user_turn", False)),
         input_content_field=values["input_field"],

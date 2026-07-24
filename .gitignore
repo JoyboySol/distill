@@ -42,3 +42,8 @@ Thumbs.db
 
 *.json
 *.csv
+
+logs/*
+*.parquet
+data
+models

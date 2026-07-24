@@ -263,7 +263,54 @@ def _extract_fn_name(metadata: Any) -> Optional[str]:
     return None
 
 
+def _build_tests_field_sample(row_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    try:
+        parsed = _load_json_string(row_data.get("tests"))
+    except Exception:
+        return None
+    if not isinstance(parsed, dict):
+        return None
+
+    inputs = _ensure_list_of_strings(parsed.get("inputs"))
+    outputs = _ensure_list_of_strings(parsed.get("outputs"))
+    if inputs and len(inputs) == len(outputs):
+        fn_name = parsed.get("fn_name")
+        return {
+            "inputs": inputs,
+            "outputs": outputs,
+            "fn_name": fn_name if isinstance(fn_name, str) and fn_name.strip() else None,
+            "source": "tests_input_output",
+        }
+
+    yulan_inputs: List[str] = []
+    yulan_outputs: List[str] = []
+    for split_name in ("public_tests", "private_tests"):
+        split = parsed.get(split_name)
+        if not isinstance(split, dict):
+            continue
+        split_inputs = _ensure_list_of_strings(split.get("input"))
+        split_outputs = _ensure_list_of_strings(split.get("output"))
+        if len(split_inputs) != len(split_outputs):
+            continue
+        yulan_inputs.extend(split_inputs)
+        yulan_outputs.extend(split_outputs)
+
+    if not yulan_inputs or len(yulan_inputs) != len(yulan_outputs):
+        return None
+
+    return {
+        "inputs": yulan_inputs,
+        "outputs": yulan_outputs,
+        "fn_name": None,
+        "source": "yulan_code_tests",
+    }
+
+
 def build_livecodebench_sample(row_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    tests_field_sample = _build_tests_field_sample(row_data)
+    if tests_field_sample:
+        return tests_field_sample
+
     for field in ("input_output", "evaluation_sample"):
         parsed = _load_json_string(row_data.get(field))
         if isinstance(parsed, dict):
